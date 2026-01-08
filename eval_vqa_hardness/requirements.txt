@@ -1,0 +1,37 @@
+# VQA评估框架依赖包 - 本地模型版
+
+# ===== 核心依赖 =====
+torch>=2.0.0
+transformers>=4.35.0
+Pillow>=10.0.0
+tqdm>=4.66.0
+
+# ===== 分析和可视化 =====
+matplotlib>=3.7.0
+numpy>=1.24.0
+
+# ===== 可选：加速推理 =====
+# 如果需要量化加载模型或加速推理，取消下面的注释
+# accelerate>=0.25.0
+# bitsandbytes>=0.41.0
+
+# ===== 可选：特定模型可能需要 =====
+# 某些模型的tokenizer可能需要这些包
+# sentencepiece>=0.1.99
+# protobuf>=3.20.0
+
+# ===== LLaVA-OneVision / Qwen2-VL 模型必需 =====
+# 这些模型需要 qwen_vl_utils 来处理视觉信息
+qwen-vl-utils>=0.0.8
+
+# ===== 可选：支持更多图片格式 =====
+# opencv-python>=4.8.0
+
+# ===== 说明 =====
+# 1. 如果使用CUDA，请根据你的CUDA版本安装对应的PyTorch:
+#    CUDA 11.8: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+#    CUDA 12.1: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+#
+# 2. 如果遇到显存不足，可以安装bitsandbytes进行模型量化
+#
+# 3. 如果模型加载时提示缺少某些包，按提示安装即可
