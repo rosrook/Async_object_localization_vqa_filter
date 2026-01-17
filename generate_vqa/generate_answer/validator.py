@@ -6,6 +6,7 @@ import json
 import re
 from typing import Dict, Any, List, Optional, Tuple
 from utils.gemini_client import GeminiClient
+from generate_vqa.logger import log_warning, log_debug, log_debug_dict
 
 
 class AnswerValidator:
@@ -35,6 +36,25 @@ class AnswerValidator:
         Returns:
             (修复后的结果, 校验报告)
         """
+        log_debug("========== Validator.validate_and_fix 开始 ==========")
+        log_debug_dict("Validator 接收到的 result", {
+            "question": result.get("question"),
+            "question_type": result.get("question_type"),
+            "answer": result.get("answer"),
+            "full_question": result.get("full_question"),
+            "options": result.get("options"),
+            "correct_option": result.get("correct_option"),
+            "explanation": result.get("explanation", "")[:100] if result.get("explanation") else ""
+        })
+        
+        # 特别详细记录 options
+        if result.get("options"):
+            log_debug("Validator 接收到的 options 字典:")
+            for key, value in result.get("options", {}).items():
+                log_debug(f"  {key}: {value} (type: {type(value).__name__})")
+        else:
+            log_warning("Validator 接收到的 options 为空或 None!")
+        
         validation_report = {
             "format_check": {},
             "vqa_validation": {},
@@ -45,8 +65,25 @@ class AnswerValidator:
         }
         
         # Step 1: 格式检查与修复
+        log_debug("========== Step 1: 格式检查与修复 ==========")
         fixed_result, format_report = self._format_check_and_fix(result)
         validation_report["format_check"] = format_report
+        
+        log_debug_dict("格式检查后的 fixed_result", {
+            "question": fixed_result.get("question"),
+            "question_type": fixed_result.get("question_type"),
+            "answer": fixed_result.get("answer"),
+            "full_question": fixed_result.get("full_question"),
+            "options": fixed_result.get("options"),
+            "correct_option": fixed_result.get("correct_option")
+        })
+        
+        # 确保所有原始字段都被保留（特别是options字段）
+        # 如果fixed_result中缺少某些字段，从原始result中补充
+        for key in result.keys():
+            if key not in fixed_result:
+                fixed_result[key] = result[key]
+                log_debug(f"从原始 result 补充字段: {key} = {result[key]}")
         
         if not format_report.get("passed", False):
             validation_report["validation_passed"] = False
@@ -57,21 +94,34 @@ class AnswerValidator:
             return fixed_result, validation_report
         
         # Step 2: VQA验证
+        log_debug("========== Step 2: VQA验证 ==========")
+        log_debug_dict("传递给 _vqa_validation 的 fixed_result", {
+            "question": fixed_result.get("question"),
+            "question_type": fixed_result.get("question_type"),
+            "answer": fixed_result.get("answer"),
+            "full_question": fixed_result.get("full_question"),
+            "options": fixed_result.get("options"),
+            "correct_option": fixed_result.get("correct_option")
+        })
+        
         vqa_report = self._vqa_validation(
             result=fixed_result,
             image_base64=image_base64
         )
         validation_report["vqa_validation"] = vqa_report
         
+        log_debug("========== Validator.validate_and_fix 结束 ==========\n")
+        
         if not vqa_report.get("passed", False):
             validation_report["validation_passed"] = False
             # VQA验证失败时，建议重新生成
             validation_report["should_regenerate"] = True
             
-            # 收集失败原因
+            # 收集失败原因（不再包含困惑度分析）
             reasons = []
-            if not vqa_report.get("perplexity_analysis", {}).get("passed", True):
-                reasons.append("困惑度分析未通过")
+            # 困惑度分析已禁用，不再作为验证要求
+            # if not vqa_report.get("perplexity_analysis", {}).get("passed", True):
+            #     reasons.append("困惑度分析未通过")
             if not vqa_report.get("confidence_assessment", {}).get("passed", True):
                 reasons.append("置信度评估未通过")
             if not vqa_report.get("answer_validation", {}).get("passed", True):
@@ -104,8 +154,28 @@ class AnswerValidator:
         fixed_result = result.copy()
         question_type = result.get("question_type", "")
         
-        # 检查占位符
-        placeholder_issues = self._check_placeholders(result)
+        # 首先修复答案格式：如果 answer 是 JSON 字符串格式，解析并提取纯文本
+        answer_raw = fixed_result.get("answer", "")
+        if isinstance(answer_raw, str) and answer_raw.strip().startswith("{") and answer_raw.strip().endswith("}"):
+            try:
+                import json
+                answer_dict = json.loads(answer_raw.strip().strip('"\''))
+                # 提取 Answer 字段
+                cleaned_answer = answer_dict.get("Answer") or answer_dict.get("answer") or answer_dict.get("option") or answer_dict.get("text")
+                if cleaned_answer and isinstance(cleaned_answer, str):
+                    fixed_result["answer"] = cleaned_answer.strip()
+                    # 如果 explanation 为空，尝试从 JSON 中提取
+                    if not fixed_result.get("explanation"):
+                        explanation = answer_dict.get("Explanation") or answer_dict.get("explanation")
+                        if explanation and isinstance(explanation, str):
+                            fixed_result["explanation"] = explanation.strip()
+                    log_debug(f"修复了 JSON 字符串格式的答案: {answer_raw[:50]}... -> {fixed_result['answer']}")
+            except (json.JSONDecodeError, ValueError):
+                # 如果解析失败，保持原样
+                pass
+        
+        # 检查占位符（使用修复后的结果）
+        placeholder_issues = self._check_placeholders(fixed_result)
         if placeholder_issues:
             report["issues"].extend(placeholder_issues)
             report["passed"] = False
@@ -370,14 +440,19 @@ class AnswerValidator:
         answer = result.get("answer", "")
         full_question = result.get("full_question", question)
         
-        # 困惑度分析
-        perplexity = self._analyze_perplexity(
-            question=full_question,
-            answer=answer,
-            image_base64=image_base64,
-            question_type=question_type
-        )
-        report["perplexity_analysis"] = perplexity
+        # 困惑度分析（已禁用，不再作为验证要求）
+        # perplexity = self._analyze_perplexity(
+        #     question=full_question,
+        #     answer=answer,
+        #     image_base64=image_base64,
+        #     question_type=question_type
+        # )
+        # 仍然记录，但不作为验证要求
+        report["perplexity_analysis"] = {
+            "passed": True,  # 始终通过，不作为验证要求
+            "disabled": True,
+            "note": "困惑度分析已禁用，不再作为验证要求"
+        }
         
         # 置信度评估
         confidence = self._assess_confidence(
@@ -399,9 +474,8 @@ class AnswerValidator:
         )
         report["answer_validation"] = answer_validation
         
-        # 综合判断
-        if not perplexity.get("passed", True) or \
-           not confidence.get("passed", True) or \
+        # 综合判断（不再检查困惑度）
+        if not confidence.get("passed", True) or \
            not answer_validation.get("passed", True):
             report["passed"] = False
         
@@ -469,7 +543,7 @@ Return a JSON object:
             }
             
         except Exception as e:
-            print(f"[WARNING] 困惑度分析失败: {e}")
+            log_warning(f"困惑度分析失败: {e}")
             return {
                 "passed": False,
                 "clarity_score": 0.5,
@@ -489,14 +563,40 @@ Return a JSON object:
         置信度评估
         
         评估答案的置信度，判断答案是否正确
+        
+        注意：对于选择题，question 参数应该是 full_question（包含选项的完整问题）
         """
         if question_type == "multiple_choice" and options:
-            options_text = "\n".join([f"{k}: {v}" for k, v in options.items()])
+            # 对于选择题，优先使用 options 字典构建完整问题，确保信息完整
+            if options and len(options) > 0:
+                # 从 question 中提取原始问题（去掉可能存在的选项部分）
+                base_question = question
+                if "\nA:" in question:
+                    base_question = question.split("\nA:")[0].strip()
+                elif "\nA. " in question:
+                    base_question = question.split("\nA. ")[0].strip()
+                
+                # 使用 options 字典构建完整的选项文本
+                options_list = []
+                for key in sorted(options.keys()):  # 按字母顺序排序（A, B, C, D...）
+                    option_value = options[key]
+                    # 确保选项值是字符串
+                    if isinstance(option_value, dict):
+                        option_value = option_value.get("option", option_value.get("text", str(option_value)))
+                    elif not isinstance(option_value, str):
+                        option_value = str(option_value)
+                    options_list.append(f"{key}: {option_value}")
+                
+                options_text = "\n".join(options_list)
+                full_question_text = f"{base_question}\n{options_text}"
+            else:
+                # 如果没有 options 字典，使用 question（可能是 full_question）
+                full_question_text = question
+            
             prompt = f"""Assess the confidence and correctness of this multiple-choice VQA answer.
 
-Question: {question}
-Options:
-{options_text}
+Full Question (including options):
+{full_question_text}
 Given Answer: {answer}
 
 Evaluate:
@@ -560,7 +660,7 @@ Return a JSON object:
             }
             
         except Exception as e:
-            print(f"[WARNING] 置信度评估失败: {e}")
+            log_warning(f"置信度评估失败: {e}")
             return {
                 "passed": False,
                 "is_correct": False,
@@ -580,15 +680,86 @@ Return a JSON object:
         答案验证
         
         验证答案是否与图片内容一致
+        
+        注意：对于选择题，question 参数应该是 full_question（包含选项的完整问题）
         """
+        log_debug("========== _validate_answer 开始 ==========")
+        log_debug_dict("_validate_answer 接收到的参数", {
+            "question": question,
+            "answer": answer,
+            "question_type": question_type,
+            "options": options,
+            "image_base64_length": len(image_base64) if image_base64 else 0
+        })
+        
         if question_type == "multiple_choice" and options:
-            answer_text = options.get(answer.upper(), answer)
-            options_text = "\n".join([f"{k}: {v}" for k, v in options.items()])
+            log_debug("处理选择题验证")
+            log_debug(f"原始 question: {question}")
+            log_debug(f"options 字典: {options}")
+            # 对于选择题，优先使用 options 字典构建完整问题，确保信息完整
+            # 即使 question 看起来已经包含选项，也使用 options 字典重新构建，避免格式问题
+            if options and len(options) > 0:
+                # 从 question 中提取原始问题（去掉可能存在的选项部分）
+                base_question = question
+                # 如果 question 包含选项标记，尝试提取原始问题
+                if "\nA:" in question:
+                    base_question = question.split("\nA:")[0].strip()
+                    log_debug(f"从 question 中提取 base_question (包含 \\nA:): {base_question}")
+                elif "\nA. " in question:
+                    base_question = question.split("\nA. ")[0].strip()
+                    log_debug(f"从 question 中提取 base_question (包含 \\nA. ): {base_question}")
+                else:
+                    log_debug(f"question 不包含选项标记，直接使用: {base_question}")
+                
+                # 使用 options 字典构建完整的选项文本
+                options_list = []
+                log_debug("构建选项列表:")
+                for key in sorted(options.keys()):  # 按字母顺序排序（A, B, C, D...）
+                    option_value = options[key]
+                    log_debug(f"  处理选项 {key}: {option_value} (type: {type(option_value).__name__})")
+                    
+                    # 确保选项值是字符串
+                    if isinstance(option_value, dict):
+                        # 如果是字典，尝试提取文本
+                        option_value = option_value.get("option", option_value.get("text", str(option_value)))
+                        log_debug(f"    从字典中提取: {option_value}")
+                    elif not isinstance(option_value, str):
+                        option_value = str(option_value)
+                        log_debug(f"    转换为字符串: {option_value}")
+                    
+                    options_list.append(f"{key}: {option_value}")
+                    log_debug(f"    最终选项文本: {key}: {option_value}")
+                
+                options_text = "\n".join(options_list)
+                full_question_text = f"{base_question}\n{options_text}"
+                log_debug(f"构建的完整问题 (full_question_text):")
+                log_debug(full_question_text)
+            else:
+                # 如果没有 options 字典，使用 question（可能是 full_question）
+                full_question_text = question
+                log_warning("options 字典为空，直接使用 question 作为 full_question_text")
+                log_debug(f"使用的 full_question_text: {full_question_text}")
+            
+            # 获取答案对应的文本
+            if options and answer.upper() in options:
+                answer_text = options[answer.upper()]
+                log_debug(f"从 options 中获取答案文本: {answer} -> {answer_text} (type: {type(answer_text).__name__})")
+                
+                # 确保 answer_text 是字符串
+                if isinstance(answer_text, dict):
+                    answer_text = answer_text.get("option", answer_text.get("text", str(answer_text)))
+                    log_debug(f"从字典中提取答案文本: {answer_text}")
+                elif not isinstance(answer_text, str):
+                    answer_text = str(answer_text)
+                    log_debug(f"转换答案文本为字符串: {answer_text}")
+            else:
+                answer_text = answer
+                log_warning(f"答案 {answer} 不在 options 中，直接使用答案作为 answer_text")
+            
             prompt = f"""Validate whether the given answer is correct for this multiple-choice VQA question.
 
-Question: {question}
-Options:
-{options_text}
+Full Question (including options):
+{full_question_text}
 Given Answer: {answer} (which corresponds to: {answer_text})
 
 Verify:
@@ -602,6 +773,9 @@ Return a JSON object:
     "validation_reason": "detailed explanation",
     "issues": ["list of any validation issues"]
 }}"""
+            
+            log_debug("构建的验证 prompt (前1000字符):")
+            log_debug(prompt[:1000] + "..." if len(prompt) > 1000 else prompt)
         else:
             prompt = f"""Validate whether the given answer is correct for this VQA question.
 
@@ -650,7 +824,7 @@ Return a JSON object:
             }
             
         except Exception as e:
-            print(f"[WARNING] 答案验证失败: {e}")
+            log_warning(f"答案验证失败: {e}")
             return {
                 "passed": False,
                 "is_valid": False,

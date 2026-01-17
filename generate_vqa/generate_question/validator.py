@@ -6,6 +6,7 @@ import json
 import re
 from typing import Dict, Any, Optional, Tuple
 from utils.gemini_client import GeminiClient
+from utils.async_client import AsyncGeminiClient
 
 
 class QuestionValidator:
@@ -159,5 +160,165 @@ Return only JSON, no other text."""
             
         except Exception as e:
             print(f"[WARNING] 问题验证失败: {e}")
+            return False, f"验证过程出错: {str(e)}"
+    
+    async def validate_async(
+        self,
+        question: str,
+        image_base64: str,
+        pipeline_config: Dict[str, Any],
+        global_constraints: Dict[str, Any],
+        async_client: Optional[AsyncGeminiClient] = None,
+        model: Optional[str] = None
+    ) -> tuple[bool, str]:
+        """
+        异步验证问题是否符合约束
+        
+        Args:
+            question: 生成的问题文本
+            image_base64: 图片的base64编码
+            pipeline_config: Pipeline配置
+            global_constraints: 全局约束
+            async_client: 异步客户端实例（可选）
+            model: 模型名称（可选）
+            
+        Returns:
+            (是否通过验证, 验证原因)
+        """
+        # 基本检查
+        if not question or len(question.strip()) == 0:
+            return False, "问题为空"
+        
+        # 检查全局约束
+        if not self._check_global_constraints(question, global_constraints):
+            return False, "违反全局约束"
+        
+        # 检查Pipeline特定约束
+        if not self._check_pipeline_constraints(question, pipeline_config):
+            return False, "违反Pipeline约束"
+        
+        # 使用LLM进行深度验证
+        is_valid, reason = await self._validate_with_llm_async(
+            question=question,
+            image_base64=image_base64,
+            pipeline_config=pipeline_config,
+            global_constraints=global_constraints,
+            async_client=async_client,
+            model=model
+        )
+        
+        return is_valid, reason
+    
+    async def _validate_with_llm_async(
+        self,
+        question: str,
+        image_base64: str,
+        pipeline_config: Dict[str, Any],
+        global_constraints: Dict[str, Any],
+        async_client: Optional[AsyncGeminiClient] = None,
+        model: Optional[str] = None
+    ) -> tuple[bool, str]:
+        """异步使用LLM进行深度验证"""
+        validation_rules = global_constraints.get("validation_rules", [])
+        question_constraints = pipeline_config.get("question_constraints", [])
+        
+        prompt = f"""You are a VQA question validation expert. Validate whether the given question meets all requirements.
+
+Question: "{question}"
+
+Pipeline Intent: {pipeline_config.get("intent", "")}
+
+Global Validation Rules:
+{chr(10).join(f"- {rule}" for rule in validation_rules)}
+
+Pipeline-Specific Constraints:
+{chr(10).join(f"- {constraint}" for constraint in question_constraints)}
+
+Check if the question:
+1. Explicitly references at least one visual entity or region in the image
+2. Is answerable solely based on the image
+3. Would have a different answer if the image content changes
+4. Does NOT rely on external knowledge or commonsense only
+5. Follows the pipeline intent and constraints
+
+You MUST return a valid JSON object with the following structure:
+{{
+    "valid": true/false,
+    "reason": "detailed explanation of why the question is valid or invalid"
+}}
+
+Return ONLY valid JSON, no other text."""
+
+        try:
+            # 构建图像内容（OpenAI兼容格式）
+            image_content = {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/jpeg;base64,{image_base64}"
+                }
+            }
+            
+            text_content = {
+                "type": "text",
+                "text": prompt
+            }
+            
+            # 确定使用的模型名称
+            if model is None:
+                if async_client is not None:
+                    model = async_client.model_name
+                else:
+                    import config
+                    model = config.MODEL_NAME
+            
+            # 使用异步客户端
+            if async_client is None:
+                async with AsyncGeminiClient() as client:
+                    response = await client.chat.completions.create(
+                        model=model,
+                        messages=[
+                            {
+                                "role": "user",
+                                "content": [text_content, image_content]
+                            }
+                        ],
+                        max_tokens=1000,
+                        temperature=0.3,
+                        response_format={"type": "json_object"}
+                    )
+            else:
+                response = await async_client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [text_content, image_content]
+                        }
+                    ],
+                    max_tokens=1000,
+                    temperature=0.3,
+                    response_format={"type": "json_object"}
+                )
+            
+            # 提取响应内容
+            response_text = response.choices[0].message.content
+            
+            # 解析JSON响应
+            try:
+                result = json.loads(response_text)
+            except json.JSONDecodeError:
+                # 如果JSON解析失败，尝试从文本中提取JSON
+                json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+                if json_match:
+                    result = json.loads(json_match.group())
+                else:
+                    return False, "无法解析验证结果"
+            
+            is_valid = result.get("valid", False)
+            reason = result.get("reason", "验证失败")
+            return is_valid, reason
+            
+        except Exception as e:
+            print(f"[WARNING] 异步问题验证失败: {e}")
             return False, f"验证过程出错: {str(e)}"
 

@@ -13,50 +13,84 @@ from PIL import Image
 import config
 import os
 
+# 尝试导入 LBOpenAIAsyncClient（如果可用）
+try:
+    from redeuler.client.openai import LBOpenAIAsyncClient
+    HAS_LB_CLIENT = True
+except ImportError:
+    HAS_LB_CLIENT = False
+    LBOpenAIAsyncClient = None
+
 
 class AsyncGeminiClient:
     """异步API客户端，支持高并发和GPU绑定"""
     
     def __init__(self, api_key: Optional[str] = None, model_name: Optional[str] = None, 
                  base_url: Optional[str] = None, gpu_id: Optional[int] = None,
-                 max_concurrent: int = 10, request_delay: float = 0.1):
+                 max_concurrent: int = 10, request_delay: float = 0.1,
+                 service_name: Optional[str] = None, env: Optional[str] = None,
+                 use_lb_client: bool = True):
         """
         初始化异步客户端
         
         Args:
             api_key: API密钥
             model_name: 模型名称
-            base_url: API基础URL
+            base_url: API基础URL（如果使用LBOpenAIAsyncClient则不需要）
             gpu_id: 绑定的GPU ID（用于进程隔离，不影响API调用）
             max_concurrent: 最大并发请求数（建议1-5，某些API不支持高并发）
             request_delay: 每个请求之间的延迟（秒），用于避免触发API并发限制
+            service_name: 服务名称（用于LBOpenAIAsyncClient，如果为None则从config读取）
+            env: 环境（用于LBOpenAIAsyncClient，如果为None则从config读取）
+            use_lb_client: 是否使用LBOpenAIAsyncClient（推荐，与vlmtool/generate_vqa一致）
         """
         self.api_key = api_key or config.API_KEY
         self.model_name = model_name or config.MODEL_NAME
         self.base_url = base_url or config.BASE_URL
+        self.service_name = service_name or getattr(config, 'SERVICE_NAME', None)
+        self.env = env or getattr(config, 'ENV', 'prod')
         self.gpu_id = gpu_id
         self.max_concurrent = max_concurrent
+        self.use_lb_client = use_lb_client and HAS_LB_CLIENT
         
-        # 检查 API Key 是否有效
-        if not self.api_key or self.api_key.strip() == "" or self.api_key == "1":
-            raise ValueError(
-                "API Key未设置或无效！\n"
-                "请设置环境变量 API_KEY，例如：\n"
-                "  export API_KEY='your-actual-api-key'\n"
-                "或在 .env 文件中设置：\n"
-                "  API_KEY=your-actual-api-key"
+        # 如果使用 LBOpenAIAsyncClient，检查必需参数
+        if self.use_lb_client:
+            if not self.service_name:
+                raise ValueError("Service Name未设置，请在config.py中设置SERVICE_NAME或在初始化时传入")
+            # 初始化 LBOpenAIAsyncClient（与vlmtool/generate_vqa一致）
+            # 注意：LBOpenAIAsyncClient 可能内部创建了 aiohttp.ClientSession
+            self.lb_client = LBOpenAIAsyncClient(
+                service_name=self.service_name,
+                env=self.env,
+                api_key=self.api_key or "1"
             )
-        
-        if not self.base_url:
-            raise ValueError("Base URL未设置")
+            # LBOpenAIAsyncClient 内部处理会话，不需要自己创建
+            self.session = None
+            # 标记是否需要关闭 lb_client
+            self._lb_client_needs_close = True
+        else:
+            # 使用自定义实现（向后兼容）
+            # 检查 API Key 是否有效（只检查 None 和空字符串，允许 "1" 作为有效值）
+            if not self.api_key or self.api_key.strip() == "":
+                raise ValueError(
+                    "API Key未设置或无效！\n"
+                    "请设置环境变量 API_KEY，例如：\n"
+                    "  export API_KEY='your-actual-api-key'\n"
+                    "或在 .env 文件中设置：\n"
+                    "  API_KEY=your-actual-api-key"
+                )
+            
+            if not self.base_url:
+                raise ValueError("Base URL未设置")
+            
+            # 创建会话
+            self.session: Optional[aiohttp.ClientSession] = None
         
         # 设置GPU可见性（用于进程隔离）
         if gpu_id is not None:
             os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
             print(f"[INFO] GPU绑定: GPU {gpu_id}")
         
-        # 创建会话
-        self.session: Optional[aiohttp.ClientSession] = None
         self.semaphore = asyncio.Semaphore(max_concurrent)
         
         # 请求间隔控制（避免触发API并发限制）
@@ -65,21 +99,72 @@ class AsyncGeminiClient:
     
     async def __aenter__(self):
         """异步上下文管理器入口"""
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
-        timeout = aiohttp.ClientTimeout(total=300)  # 5分钟超时
-        self.session = aiohttp.ClientSession(
-            headers=headers,
-            timeout=timeout
-        )
-        return self
+        if self.use_lb_client:
+            # LBOpenAIAsyncClient 自己管理会话
+            return self
+        else:
+            # 自定义实现：创建 aiohttp 会话
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
+            }
+            timeout = aiohttp.ClientTimeout(total=300)  # 5分钟超时
+            self.session = aiohttp.ClientSession(
+                headers=headers,
+                timeout=timeout
+            )
+            return self
     
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """异步上下文管理器出口"""
-        if self.session:
-            await self.session.close()
+        if self.use_lb_client:
+            # LBOpenAIAsyncClient 自己管理会话，需要正确关闭
+            # 根据 vlmtool/generate_vqa 的实现，LBOpenAIAsyncClient 有 close() 方法
+            try:
+                # 方法1: 直接调用 close() 方法（与vlmtool一致）
+                if hasattr(self.lb_client, 'close'):
+                    close_method = getattr(self.lb_client, 'close')
+                    if asyncio.iscoroutinefunction(close_method):
+                        await close_method()
+                    else:
+                        close_method()
+                
+                # 方法2: 尝试关闭内部的 aiohttp session（如果存在）
+                # LBOpenAIAsyncClient 可能内部创建了 aiohttp.ClientSession
+                for attr_name in ['_client', 'client', '_session', 'session', '_http_client']:
+                    if hasattr(self.lb_client, attr_name):
+                        inner_obj = getattr(self.lb_client, attr_name)
+                        if inner_obj is not None:
+                            # 如果是 aiohttp.ClientSession，需要关闭
+                            if isinstance(inner_obj, aiohttp.ClientSession):
+                                if not inner_obj.closed:
+                                    await inner_obj.close()
+                                    await asyncio.sleep(0.1)  # 等待连接完全关闭
+                                    break
+                            # 如果有 close 方法
+                            elif hasattr(inner_obj, 'close'):
+                                close_method = getattr(inner_obj, 'close')
+                                if asyncio.iscoroutinefunction(close_method):
+                                    await close_method()
+                                else:
+                                    close_method()
+                                break
+            except Exception as e:
+                # 记录警告但不抛出异常，避免影响正常流程
+                import warnings
+                warnings.warn(f"关闭 LBOpenAIAsyncClient 时出现警告: {e}", RuntimeWarning)
+        else:
+            # 自定义实现：关闭 aiohttp 会话
+            if self.session and not self.session.closed:
+                try:
+                    await self.session.close()
+                    # 等待一小段时间确保连接完全关闭
+                    await asyncio.sleep(0.1)
+                except Exception as e:
+                    import warnings
+                    warnings.warn(f"关闭 aiohttp session 时出现警告: {e}", RuntimeWarning)
+                finally:
+                    self.session = None
     
     def _encode_image(self, image_input: Union[str, Path, bytes, Image.Image]) -> str:
         """编码图片为base64，自动压缩过大图片"""
@@ -343,13 +428,13 @@ class AsyncGeminiClient:
                     error_msg += f"\n  7. 当前并发设置: max_concurrent={self.max_concurrent}, request_delay={self.request_delay}s"
                 raise Exception(error_msg) from last_exception
             else:
-            # 理论上不应该到达这里，但为了安全
-            raise Exception("请求失败：所有重试都失败，但未捕获到异常")
+                # 理论上不应该到达这里，但为了安全
+                raise Exception("请求失败：所有重试都失败，但未捕获到异常")
     
     # ==================== OpenAI 兼容接口 ====================
     
-    class _ChatCompletions:
-        """OpenAI兼容的chat.completions接口"""
+    class _Completions:
+        """OpenAI兼容的completions接口"""
         def __init__(self, parent_client):
             self._parent = parent_client
         
@@ -381,6 +466,21 @@ class AsyncGeminiClient:
             if stream:
                 raise NotImplementedError("流式输出暂不支持")
             
+            # 如果使用 LBOpenAIAsyncClient，直接委托给它
+            if self._parent.use_lb_client:
+                async with self._parent.semaphore:  # 控制并发
+                    if self._parent.request_delay > 0:
+                        await asyncio.sleep(self._parent.request_delay)
+                    return await self._parent.lb_client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        response_format=response_format,
+                        **kwargs
+                    )
+            
+            # 自定义实现（向后兼容）
             if not self._parent.session:
                 raise RuntimeError("Session not initialized. Use async with statement.")
             
@@ -447,10 +547,16 @@ class AsyncGeminiClient:
             
             return _Response(response_text)
     
+    class _Chat:
+        """OpenAI兼容的chat接口"""
+        def __init__(self, parent_client):
+            self._parent = parent_client
+            self.completions = AsyncGeminiClient._Completions(parent_client)
+    
     @property
     def chat(self):
-        """返回chat.completions接口"""
-        return self._ChatCompletions(self)
+        """返回chat.completions接口（与LBOpenAIAsyncClient兼容）"""
+        return self._Chat(self)
     
     async def filter_image_async(
         self,

@@ -7,13 +7,11 @@
   },
 
   "global_constraints": {
-    "image_dependency_required": true,
+    "image_dependency_required": false,
     "no_pure_language_questions": true,
 
     "forbidden_question_types": [
-      "hypothetical",
-      "commonsense_only",
-      "unanswerable_from_image"
+      "commonsense_only"
     ],
 
     "grounding_policy": {
@@ -28,7 +26,6 @@
     },
 
     "validation_rules": [
-      "question must depend on visual information in the image",
       "question must not be answerable without seeing the image"
     ]
   },
@@ -38,10 +35,6 @@
     "selection_stage": "pre_question_generation",
     "selection_source": "image_objects",
     "general_criteria": [
-      "object must be clearly visible",
-      "object must be visually salient",
-      "object must be relevant to the pipeline intent",
-      "object must support a non-trivial question"
     ],
     "fallback_strategy": "discard_image"
   },
@@ -56,10 +49,30 @@
       "required_slots": [],
       "optional_slots": ["object_category_granularity"],
       "question_constraints": [
-        "question must ask what object or concept is shown",
-        "no spatial, counting, or relational reasoning"
-      ],
+        "Questions must target the concept, property, or process conveyed by the image, not only object recognition",
+        "If external knowledge is needed to identify the correct answer, a concise guiding hint must be provided",
+        "Fill-in-the-blank questions should provide sufficient guidance so the concept can be inferred",
+        "The question must instruct the respondent to answer based on the image"
+    ],
       "example_template": "Which term best matches the picture?"
+    },
+
+    "visual_recognition": {
+      "name": "Main Object Identification Pipeline",
+      "intent": "visual_recognition",
+      "description": "Recognize the main object depicted in the image without explicitly revealing it in the question text.",
+      "question_intent": "identify_main_object",
+      "answer_type": "single_label",
+      "required_slots": [],
+      "optional_slots": ["object_category_granularity"],
+      "question_constraints": [
+        "Questions must ask about the main object in the image without including its name or synonyms in the question itself",
+        "Questions should encourage reasoning from visual features, context, or function rather than directly stating the object",
+        "If external knowledge is necessary to infer the correct answer, a brief, neutral hint may be included without revealing the object",
+        "Questions must instruct the respondent to answer based solely on the image",
+        "Avoid leading questions or providing cues that make the answer trivial"
+      ],
+      "example_template": "Which object appears as the primary focus in the picture?"
     },
 
     "caption": {
@@ -71,9 +84,9 @@
       "required_slots": [],
       "optional_slots": ["caption_style"],
       "question_constraints": [
-        "question must describe the overall scene",
+        "question must ask the overall scene",
         "no object-level localization or counting",
-        "no subjective judgment"
+        "The question must instruct the respondent to answer based on the image"
       ],
       "example_template": "Which one is the correct caption of this image?"
     },
@@ -87,8 +100,10 @@
       "required_slots": [],
       "optional_slots": ["location_granularity"],
       "question_constraints": [
-        "place must be identifiable from visual cues",
-        "no historical or external knowledge"
+        "Questions must focus only on the visually salient or highlighted region of the image",
+        "Questions should specifically ask for the real-world place name depicted in that region",
+        "External or historical knowledge may be used to identify the place name if necessary",
+        "The question must instruct the respondent to answer based on the image"
       ],
       "example_template": "What is the name of the place shown?"
     },
@@ -104,7 +119,8 @@
       "question_constraints": [
         "associated text must be image-grounded",
         "no fictional storytelling",
-        "text should be realistic and concise"
+        "text should be realistic and concise",
+        "The question must instruct the respondent to answer based on the image"
       ],
       "example_template": "Which text could be associated with this image if it were posted on social media?"
     },
@@ -127,8 +143,9 @@
         ]
       },
       "question_constraints": [
-        "question must focus on relative size or proportion",
-        "answers should be approximate"
+        "question must focus on relative size or proportion in the image",
+        "question must explicitly mention the selected object or category",
+        "The question must instruct the respondent to answer based on the image"
       ],
       "example_template": "Approximately what proportion of the picture is occupied by [object]?"
     },
@@ -152,7 +169,10 @@
       },
       "question_constraints": [
         "question must explicitly mention the selected object",
-        "no object counting or attribute reasoning"
+        "no object counting or attribute reasoning",
+        "question must ask target object position",
+        "the question must explicitly instruct the respondent to answer using absolute image-based spatial positions (e.g., bottom-right of the image)",
+        "The question must instruct the respondent to answer based on the image"
       ],
       "example_template": "Where is the [object] located in the picture?"
     },
@@ -176,7 +196,8 @@
       },
       "question_constraints": [
         "question must focus on absence, not presence",
-        "regions must be predefined"
+        "if the question is a fill-in-the-blank type, the question must roughly describe the expected answer format, e.g., how to indicate positions in the image or how many regions are involved",
+        "The question must instruct the respondent to answer based on the image"
       ],
       "example_template": "Which corner doesn't have any [objects]?"
     },
@@ -199,8 +220,8 @@
         ]
       },
       "question_constraints": [
-        "question must ask about facing direction only",
-        "no motion or action inference"
+        "question must ask about facing direction only, referring to absolute direction in the image (e.g., facing left in the image), not relative direction within the scene",
+        "The question must instruct the respondent to answer based on the image"
       ],
       "example_template": "In the picture, which direction is the [object] facing?"
     },
@@ -237,8 +258,8 @@
     "semantic_drift_check": true,
     "discard_if_object_selection_fails": true,
     "question_type_ratio": {
-      "multiple_choice": 0.7,
-      "fill_in_blank": 0.3
+      "multiple_choice": 1.0,
+      "fill_in_blank": 0.0
     }
   }
 }

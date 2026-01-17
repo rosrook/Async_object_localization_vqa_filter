@@ -19,6 +19,7 @@ from generate_vqa.generate_question.vqa_generator import VQAGenerator
 from generate_vqa.generate_answer.answer_generator import AnswerGenerator
 from generate_vqa.generate_answer.validator import AnswerValidator
 from utils.async_client import AsyncGeminiClient
+from generate_vqa.logger import Logger, set_global_logger, get_logger, log_warning, log_error, log_debug, log_debug_dict
 
 
 class VQAPipeline:
@@ -235,7 +236,7 @@ class VQAPipeline:
                 total_failed += 1
                 # 优化：只在每10个错误时输出一次，减少日志开销
                 if total_failed % 10 == 0:
-                    print(f"[ERROR] 已累计 {total_failed} 个错误（最新: 记录 {idx}）")
+                    log_error(f"已累计 {total_failed} 个错误（最新: 记录 {idx}）")
         
         print(f"[完成] 答案生成完成！总处理: {total_processed}, 成功: {total_success}, 失败: {total_failed}")
         return results, errors
@@ -259,8 +260,8 @@ class VQAPipeline:
         
         # 如果并发数过高，给出警告
         if concurrency > 5:
-            print(f"[WARNING] 并发数设置为 {concurrency}，某些API可能不支持高并发。")
-            print(f"  如果遇到401错误，建议降低并发数（--concurrency 1-3）")
+            warning_msg = f"并发数设置为 {concurrency}，某些API可能不支持高并发。\n  如果遇到401错误，建议降低并发数（--concurrency 1-3）"
+            log_warning(warning_msg)
         
         from datetime import datetime
         
@@ -269,9 +270,21 @@ class VQAPipeline:
             async def process_one(idx: int, record: Dict[str, Any]):
                 """处理单个问题记录"""
                 try:
+                    # ========== 步骤1: 提取输入数据 ==========
                     question = record.get("question")
                     question_type = record.get("question_type")
                     image_base64 = record.get("image_base64")
+                    
+                    log_debug(f"[记录 {idx}] ========== 开始处理 ==========")
+                    log_debug_dict(f"[记录 {idx}] 输入数据", {
+                        "id": record.get("id"),
+                        "question": question,
+                        "question_type": question_type,
+                        "image_base64_length": len(image_base64) if image_base64 else 0,
+                        "pipeline_name": record.get("pipeline_name"),
+                        "pipeline_intent": record.get("pipeline_intent"),
+                        "answer_type": record.get("answer_type")
+                    })
                     
                     if not question:
                         return ("err", {
@@ -305,28 +318,70 @@ class VQAPipeline:
                     validation_report = None
                     
                     while retry_count <= max_retries:
-                        # 生成答案（异步）
+                        # ========== 步骤2: 生成答案 ==========
+                        log_debug(f"[记录 {idx}] ========== 步骤2: 生成答案 (重试 {retry_count}/{max_retries}) ==========")
+                        log_debug(f"[记录 {idx}] 调用 generate_answer_async")
+                        log_debug_dict(f"[记录 {idx}] 生成答案的输入参数", {
+                            "question": question,
+                            "question_type": question_type,
+                            "pipeline_info": pipeline_info
+                        })
+                        
+                        # 生成答案（异步，与vlmtool/generate_vqa对齐）
+                        # 获取模型名称（从config或使用默认值）
+                        import config
+                        model_name = config.MODEL_NAME
                         answer_result = await self.answer_generator.generate_answer_async(
                             question=question,
                             image_base64=image_base64,
                             question_type=question_type,
                             pipeline_info=pipeline_info,
-                            async_client=client
+                            async_client=client,
+                            model=model_name  # 传入模型名称，与vlmtool一致
                         )
+                        
+                        log_debug(f"[记录 {idx}] generate_answer_async 返回结果")
+                        log_debug_dict(f"[记录 {idx}] 答案生成结果 (answer_result)", answer_result if answer_result else {"error": "返回None"})
                         
                         if not answer_result or answer_result.get("answer") is None:
                             last_error = "答案生成失败"
+                            log_error(f"[记录 {idx}] 答案生成失败: answer_result={answer_result}")
                             retry_count += 1
                             if retry_count <= max_retries:
                                 continue
                             else:
                                 break
                         
+                        # ========== 步骤3: 校验和修复 ==========
+                        log_debug(f"[记录 {idx}] ========== 步骤3: 校验和修复 ==========")
+                        log_debug(f"[记录 {idx}] 调用 validator.validate_and_fix")
+                        log_debug_dict(f"[记录 {idx}] 传递给 validator 的 result", {
+                            "question": answer_result.get("question"),
+                            "question_type": answer_result.get("question_type"),
+                            "answer": answer_result.get("answer"),
+                            "full_question": answer_result.get("full_question"),
+                            "options": answer_result.get("options"),
+                            "correct_option": answer_result.get("correct_option"),
+                            "explanation": answer_result.get("explanation", "")[:100] if answer_result.get("explanation") else ""
+                        })
+                        
                         # 校验和修复（同步操作，但很快）
                         validated_result, validation_report = self.validator.validate_and_fix(
                             result=answer_result,
                             image_base64=image_base64
                         )
+                        
+                        log_debug(f"[记录 {idx}] validator.validate_and_fix 返回结果")
+                        log_debug_dict(f"[记录 {idx}] 验证后的结果 (validated_result)", {
+                            "question": validated_result.get("question") if validated_result else None,
+                            "question_type": validated_result.get("question_type") if validated_result else None,
+                            "answer": validated_result.get("answer") if validated_result else None,
+                            "full_question": validated_result.get("full_question") if validated_result else None,
+                            "options": validated_result.get("options") if validated_result else None,
+                            "correct_option": validated_result.get("correct_option") if validated_result else None,
+                            "explanation": validated_result.get("explanation", "")[:100] if validated_result and validated_result.get("explanation") else ""
+                        })
+                        log_debug_dict(f"[记录 {idx}] 验证报告 (validation_report)", validation_report if validation_report else {"error": "返回None"})
                         
                         if validation_report.get("validation_passed", False):
                             if retry_count > 0:
@@ -352,16 +407,45 @@ class VQAPipeline:
                             "validation_report": validation_report
                         })
                     
-                    # 构建输出结果
+                    # ========== 步骤4: 构建最终输出结果 ==========
+                    log_debug(f"[记录 {idx}] ========== 步骤4: 构建最终输出结果 ==========")
+                    
+                    final_answer = validated_result.get("answer", answer_result.get("answer"))
+                    final_explanation = validated_result.get("explanation", answer_result.get("explanation", ""))
+                    final_full_question = validated_result.get("full_question", answer_result.get("full_question", question))
+                    final_options = validated_result.get("options", answer_result.get("options"))
+                    final_correct_option = validated_result.get("correct_option", answer_result.get("correct_option"))
+                    
+                    log_debug_dict(f"[记录 {idx}] 最终输出结果字段", {
+                        "question": question,
+                        "question_type": question_type,
+                        "answer": final_answer,
+                        "full_question": final_full_question,
+                        "options": final_options,
+                        "correct_option": final_correct_option,
+                        "explanation_length": len(final_explanation) if final_explanation else 0
+                    })
+                    
+                    # 特别详细记录 options 和 full_question
+                    if final_options:
+                        log_debug(f"[记录 {idx}] 最终 options 字典内容:")
+                        for key, value in final_options.items():
+                            log_debug(f"[记录 {idx}]   {key}: {value} (type: {type(value).__name__})")
+                    else:
+                        log_warning(f"[记录 {idx}] 最终 options 为空或 None!")
+                    
+                    log_debug(f"[记录 {idx}] 最终 full_question 内容:")
+                    log_debug(f"[记录 {idx}] {final_full_question}")
+                    
                     result = {
                         "question": question,
                         "question_type": question_type,
                         "image_base64": image_base64,
-                        "answer": validated_result.get("answer", answer_result.get("answer")),
-                        "explanation": validated_result.get("explanation", answer_result.get("explanation", "")),
-                        "full_question": validated_result.get("full_question", answer_result.get("full_question", question)),
-                        "options": validated_result.get("options", answer_result.get("options")),
-                        "correct_option": validated_result.get("correct_option", answer_result.get("correct_option")),
+                        "answer": final_answer,
+                        "explanation": final_explanation,
+                        "full_question": final_full_question,
+                        "options": final_options,
+                        "correct_option": final_correct_option,
                         "validation_report": validation_report,
                         "pipeline_name": record.get("pipeline_name"),
                         "pipeline_intent": record.get("pipeline_intent"),
@@ -372,6 +456,8 @@ class VQAPipeline:
                         "timestamp": record.get("timestamp", ""),
                         "generated_at": datetime.now().isoformat()
                     }
+                    
+                    log_debug(f"[记录 {idx}] ========== 处理完成 ==========\n")
                     return ("ok", result)
                 except Exception as e:
                     return ("err", {
@@ -413,7 +499,7 @@ class VQAPipeline:
             print(f"[完成] 异步答案生成完成！成功: {len(results)}, 失败: {len(errors)}")
             return results, errors
     
-    def run(
+    async def run_async(
         self,
         input_file: Path,
         output_dir: Path,
@@ -505,17 +591,33 @@ class VQAPipeline:
                 json.dump(batch_data, f, ensure_ascii=False, separators=(',', ':'))
             
             try:
-                # Step 1: 生成问题
+                # Step 1: 生成问题（支持异步并行处理）
                 batch_questions_file = output_dir / f"batch_{batch_num}_questions_{timestamp}.json"
                 batch_question_errors = []
                 
                 try:
-                    self.question_generator.process_data_file(
-                        input_file=batch_input_file,
-                        output_file=batch_questions_file,
-                        pipeline_names=pipeline_names,
-                        max_samples=None  # 批次文件已经限制大小
-                    )
+                    # 使用异步并行处理（如果启用）
+                    if use_async:
+                        print(f"[INFO] 使用异步并行生成问题，并发数: {concurrency}")
+                        # 使用异步方法生成问题
+                        await self.question_generator.process_data_file_async(
+                            input_file=batch_input_file,
+                            output_file=batch_questions_file,
+                            pipeline_names=pipeline_names,
+                            max_samples=None,  # 批次文件已经限制大小
+                            num_gpus=1,  # 问题生成阶段使用单GPU组
+                            max_concurrent_per_gpu=concurrency,
+                            request_delay=request_delay
+                        )
+                    else:
+                        # 使用同步方法（兼容模式）
+                        print(f"[INFO] 使用同步生成问题")
+                        self.question_generator.process_data_file(
+                            input_file=batch_input_file,
+                            output_file=batch_questions_file,
+                            pipeline_names=pipeline_names,
+                            max_samples=None  # 批次文件已经限制大小
+                        )
                     
                     # 读取生成的问题
                     with open(batch_questions_file, 'r', encoding='utf-8') as f:
@@ -559,17 +661,15 @@ class VQAPipeline:
                 try:
                     # 使用异步并行处理（如果启用）
                     if use_async:
-                        print(f"[INFO] 使用异步并行处理，并发数: {concurrency}")
-                        batch_answers, answer_errors = asyncio.run(
-                            self._generate_answers_from_data_async(
-                                batch_questions,
-                                concurrency=concurrency,
-                                request_delay=request_delay
-                            )
+                        print(f"[INFO] 使用异步并行生成答案，并发数: {concurrency}")
+                        batch_answers, answer_errors = await self._generate_answers_from_data_async(
+                            batch_questions,
+                            concurrency=concurrency,
+                            request_delay=request_delay
                         )
                     else:
                         # 使用串行处理（兼容模式）
-                        print(f"[INFO] 使用串行处理")
+                        print(f"[INFO] 使用串行生成答案")
                         batch_answers, answer_errors = self._generate_answers_from_data(batch_questions)
                     
                     # 只在需要保存中间结果时写入文件
@@ -579,10 +679,72 @@ class VQAPipeline:
                             json.dump(batch_answers, f, ensure_ascii=False, separators=(',', ':'))
                     
                     print(f"✓ 批次 {batch_num} 答案生成完成: {len(batch_answers)} 个答案")
+                    if answer_errors:
+                        print(f"  - 答案生成失败: {len(answer_errors)} 条")
+                    
+                    # 处理生成失败的答案（answer_errors） - 无论异步还是同步方法返回的错误
+                    for error_item in answer_errors:
+                        # 从对应的question中找到原始数据
+                        error_index = error_item.get("index", 0)
+                        error_id = error_item.get("id")
+                        
+                        # 尝试从batch_questions中找到对应的question
+                        corresponding_question = None
+                        for q in batch_questions:
+                            if q.get("id") == error_id or (error_index > 0 and batch_questions.index(q) + 1 == error_index):
+                                corresponding_question = q
+                                break
+                        
+                        # 构建失败记录
+                        failed_item = {
+                            "question": corresponding_question.get("question") if corresponding_question else None,
+                            "question_type": corresponding_question.get("question_type") if corresponding_question else None,
+                            "image_base64": corresponding_question.get("image_base64") if corresponding_question else None,
+                            "pipeline_name": corresponding_question.get("pipeline_name") if corresponding_question else None,
+                            "pipeline_intent": corresponding_question.get("pipeline_intent") if corresponding_question else None,
+                            "answer_type": corresponding_question.get("answer_type") if corresponding_question else None,
+                            "sample_index": corresponding_question.get("sample_index") if corresponding_question else error_item.get("sample_index"),
+                            "id": error_id or (corresponding_question.get("id") if corresponding_question else None),
+                            "source_a_id": corresponding_question.get("source_a_id") if corresponding_question else None,
+                            "answer": None,  # 生成失败，没有答案
+                            "explanation": None,
+                            "full_question": corresponding_question.get("question") if corresponding_question else None,
+                            "options": None,
+                            "correct_option": None,
+                            "error": error_item.get("error", "答案生成失败"),
+                            "error_index": error_index,
+                            "retry_count": error_item.get("retry_count", 0),
+                            "batch": batch_num,
+                            "validation_passed": False,
+                            "validation_report": error_item.get("validation_report", {
+                                "validation_passed": False,
+                                "error": error_item.get("error", "答案生成失败"),
+                                "format_check": {"passed": False, "issues": [error_item.get("error", "答案生成失败")]},
+                                "vqa_validation": {"passed": False}
+                            }),
+                            "timestamp": corresponding_question.get("timestamp") if corresponding_question else datetime.now().isoformat(),
+                            "generated_at": datetime.now().isoformat()
+                        }
+                        all_answer_validation_failed.append(failed_item)
                     
                     # 分类答案数据
                     for answer in batch_answers:
-                        validation_report = answer.get("validation_report", {})
+                        # 跳过 None 值
+                        if answer is None:
+                            continue
+                        
+                        # 确保 answer 是字典类型
+                        if not isinstance(answer, dict):
+                            # 如果不是字典，跳过或创建错误记录
+                            log_warning(f"答案数据格式错误，跳过: {type(answer).__name__}")
+                            continue
+                        
+                        validation_report = answer.get("validation_report")
+                        if validation_report is None:
+                            validation_report = {}
+                        elif not isinstance(validation_report, dict):
+                            validation_report = {}
+                        
                         validation_passed = validation_report.get("validation_passed", False)
                         
                         if validation_passed:
@@ -594,6 +756,7 @@ class VQAPipeline:
                     
                     print(f"  - 校验通过: {len([a for a in batch_answers if a.get('validation_report', {}).get('validation_passed', False)])}")
                     print(f"  - 校验未通过: {len([a for a in batch_answers if not a.get('validation_report', {}).get('validation_passed', False)])}")
+                    print(f"  - 生成失败: {len(answer_errors)}")
                     
                 except Exception as e:
                     print(f"✗ 批次 {batch_num} 答案生成失败: {e}")
@@ -707,6 +870,47 @@ class VQAPipeline:
             "stats": self.stats
         }
     
+    def run(
+        self,
+        input_file: Path,
+        output_dir: Path,
+        pipeline_names: Optional[List[str]] = None,
+        max_samples: Optional[int] = None,
+        save_intermediate: bool = True,
+        batch_size: int = 1000,
+        concurrency: int = 5,  # 异步并发数（建议1-5）
+        request_delay: float = 0.1,  # 请求延迟（秒）
+        use_async: bool = True  # 是否使用异步并行处理
+    ) -> Dict[str, Any]:
+        """
+        运行完整流程（同步包装器，内部调用异步版本）
+        
+        Args:
+            input_file: 输入文件路径（batch_process.sh的输出）
+            output_dir: 输出目录
+            pipeline_names: 要使用的pipeline列表（None表示使用所有）
+            max_samples: 最大处理样本数（None表示全部）
+            save_intermediate: 是否保存中间结果
+            batch_size: 每批处理的记录数（用于大文件分流处理）
+            concurrency: 异步并发数（建议1-5）
+            request_delay: 请求延迟（秒）
+            use_async: 是否使用异步并行处理
+            
+        Returns:
+            统计信息和结果路径
+        """
+        return asyncio.run(self.run_async(
+            input_file=input_file,
+            output_dir=output_dir,
+            pipeline_names=pipeline_names,
+            max_samples=max_samples,
+            save_intermediate=save_intermediate,
+            batch_size=batch_size,
+            concurrency=concurrency,
+            request_delay=request_delay,
+            use_async=use_async
+        ))
+    
     def _prepare_final_dataset(self, answers_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         准备最终数据集
@@ -717,6 +921,27 @@ class VQAPipeline:
         final_dataset = []
         
         for answer in answers_data:
+            # 跳过 None 值
+            if answer is None:
+                continue
+            
+            # 确保 answer 是字典类型
+            if not isinstance(answer, dict):
+                # 如果不是字典，尝试转换或跳过
+                if isinstance(answer, (str, int, float)):
+                    # 如果是简单类型，创建一个基本记录
+                    answer = {"error": f"数据格式错误: {type(answer).__name__}", "raw_data": str(answer)}
+                else:
+                    # 其他类型，跳过
+                    continue
+            
+            # 安全获取 validation_report
+            validation_report = answer.get("validation_report")
+            if validation_report is None:
+                validation_report = {}
+            elif not isinstance(validation_report, dict):
+                validation_report = {}
+            
             # 构建最终数据项
             item = {
                 # 基本信息
@@ -746,20 +971,36 @@ class VQAPipeline:
                 "answer_type": answer.get("answer_type"),
                 
                 # 校验信息（简化版）
-                "validation_passed": answer.get("validation_report", {}).get("validation_passed", False),
-                "validation_score": self._calculate_validation_score(answer.get("validation_report", {})),
+                "validation_passed": answer.get("validation_passed", validation_report.get("validation_passed", False)),
+                "validation_score": self._calculate_validation_score(validation_report),
                 
                 # 时间戳
-                "generated_at": answer.get("generated_at", "")
+                "generated_at": answer.get("generated_at", ""),
+                "timestamp": answer.get("timestamp", "")
             }
             
-            # 如果有错误信息，也包含进去
+            # 如果有错误信息，也包含进去（生成失败或校验失败都会记录错误）
             if "error" in answer:
                 item["error"] = answer.get("error")
+                # 如果有错误索引或重试次数，也记录
+                if "error_index" in answer:
+                    item["error_index"] = answer.get("error_index")
+                if "retry_count" in answer:
+                    item["retry_count"] = answer.get("retry_count")
             
             # 如果有批次信息，也包含进去
             if "batch" in answer:
                 item["batch"] = answer.get("batch")
+            
+            # 如果答案生成失败，确保相关字段都有合理的默认值
+            if answer.get("answer") is None and "error" in answer:
+                item["answer"] = None
+                item["explanation"] = answer.get("explanation")  # 可能是None
+                item["full_question"] = answer.get("full_question") or answer.get("question")
+                item["options"] = answer.get("options")  # 可能是None
+                item["correct_option"] = answer.get("correct_option")  # 可能是None
+                item["validation_passed"] = False
+                item["validation_score"] = 0.0
             
             final_dataset.append(item)
         
@@ -903,6 +1144,9 @@ def main():
   
   # 不保存中间结果
   python generate_vqa/pipeline.py input.json output_dir/ --no-intermediate
+  
+  # 指定日志文件（所有错误和警告信息将写入该文件）
+  python generate_vqa/pipeline.py input.json output_dir/ --log-file log.txt
         """
     )
     
@@ -969,6 +1213,12 @@ def main():
         action='store_true',
         help='禁用异步并行处理，使用串行处理（兼容模式）'
     )
+    parser.add_argument(
+        '--log-file',
+        type=str,
+        default=None,
+        help='日志文件路径（可选，如果指定则将所有错误和警告信息写入该文件）'
+    )
     
     args = parser.parse_args()
     
@@ -1004,20 +1254,43 @@ def main():
                 answer_config_path = project_path
             # 如果都不存在，保持原路径，让后续代码处理
     
+    # 初始化日志器
+    log_file_path = None
+    if args.log_file:
+        log_file_path = Path(args.log_file)
+        if not log_file_path.is_absolute():
+            # 如果是相对路径，相对于输出目录
+            log_file_path = output_dir / log_file_path
+    
+    logger = None
+    if log_file_path:
+        logger = Logger(log_file_path)
+        set_global_logger(logger)
+        logger.info(f"日志文件: {log_file_path}")
+    
     if not input_file.exists():
-        print(f"[ERROR] 输入文件不存在: {input_file}")
-        print(f"  当前工作目录: {Path.cwd()}")
+        error_msg = f"输入文件不存在: {input_file}\n  当前工作目录: {Path.cwd()}"
+        if logger:
+            logger.error(error_msg)
+        else:
+            print(f"[ERROR] {error_msg}")
         return 1
     
     # 检查配置文件是否存在（如果指定了）
     if question_config_path and not question_config_path.exists():
-        print(f"[WARNING] 问题配置文件不存在: {question_config_path}")
-        print(f"  将使用默认配置文件")
+        warning_msg = f"问题配置文件不存在: {question_config_path}\n  将使用默认配置文件"
+        if logger:
+            logger.warning(warning_msg)
+        else:
+            print(f"[WARNING] {warning_msg}")
         question_config_path = None
     
     if answer_config_path and not answer_config_path.exists():
-        print(f"[WARNING] 答案配置文件不存在: {answer_config_path}")
-        print(f"  将使用默认配置文件")
+        warning_msg = f"答案配置文件不存在: {answer_config_path}\n  将使用默认配置文件"
+        if logger:
+            logger.warning(warning_msg)
+        else:
+            print(f"[WARNING] {warning_msg}")
         answer_config_path = None
     
     try:
@@ -1031,12 +1304,23 @@ def main():
         use_async = not args.no_async
         
         if use_async:
-            print(f"[INFO] 启用异步并行处理，并发数: {args.concurrency}")
+            info_msg = f"启用异步并行处理，并发数: {args.concurrency}"
+            if logger:
+                logger.info(info_msg)
+            else:
+                print(f"[INFO] {info_msg}")
             if args.concurrency > 5:
-                print(f"[WARNING] 并发数设置为 {args.concurrency}，某些API可能不支持高并发")
-                print(f"  如果遇到401错误，建议降低并发数（--concurrency 1-3）")
+                warning_msg = f"并发数设置为 {args.concurrency}，某些API可能不支持高并发\n  如果遇到401错误，建议降低并发数（--concurrency 1-3）"
+                if logger:
+                    logger.warning(warning_msg)
+                else:
+                    print(f"[WARNING] {warning_msg}")
         else:
-            print(f"[INFO] 使用串行处理（兼容模式）")
+            info_msg = "使用串行处理（兼容模式）"
+            if logger:
+                logger.info(info_msg)
+            else:
+                print(f"[INFO] {info_msg}")
         
         result = pipeline.run(
             input_file=input_file,
@@ -1050,13 +1334,28 @@ def main():
             use_async=use_async
         )
         
-        print("\n✓ 流程执行成功！")
+        success_msg = "流程执行成功！"
+        if logger:
+            logger.info(success_msg)
+        else:
+            print(f"\n✓ {success_msg}")
         
     except Exception as e:
-        print(f"\n✗ 流程执行失败: {e}")
-        import traceback
-        traceback.print_exc()
+        error_msg = f"流程执行失败: {e}"
+        if logger:
+            logger.error(error_msg)
+            import traceback
+            logger.error(traceback.format_exc())
+        else:
+            print(f"\n✗ {error_msg}")
+            import traceback
+            traceback.print_exc()
         return 1
+    finally:
+        # 关闭日志器
+        if logger:
+            logger.close()
+            set_global_logger(None)
     
     return 0
 

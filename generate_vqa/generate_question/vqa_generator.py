@@ -5,6 +5,7 @@ VQA问题生成系统主模块
 import json
 import re
 import random
+import asyncio
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from datetime import datetime
@@ -15,6 +16,7 @@ from .slot_filler import SlotFiller
 from .question_generator import QuestionGenerator
 from .validator import QuestionValidator
 from utils.gemini_client import GeminiClient
+from utils.async_client import AsyncGeminiClient
 
 
 class VQAGenerator:
@@ -513,4 +515,428 @@ class VQAGenerator:
                     return image_input
         
         return None
+    
+    async def process_image_pipeline_pair_async(
+        self,
+        image_base64: str,
+        pipeline_name: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        async_client: Optional[AsyncGeminiClient] = None,
+        model: Optional[str] = None
+    ) -> tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """
+        异步处理单个图片-pipeline对，生成VQA问题
+        
+        严格遵循6步流程（异步版本）：
+        1. 加载Pipeline规范
+        2. 对象选择（如果需要）
+        3. 槽位填充
+        4. 问题生成
+        5. 验证
+        6. 输出
+        
+        Args:
+            image_base64: 图片的base64编码
+            pipeline_name: Pipeline名称
+            metadata: 可选的元数据
+            async_client: 异步客户端实例（可选）
+            model: 模型名称（可选）
+            
+        Returns:
+            (成功结果, 错误/丢弃信息)
+            如果成功: (结果字典, None)
+            如果失败: (None, 错误信息字典)
+        """
+        error_info = {
+            "pipeline_name": pipeline_name,
+            "metadata": metadata or {},
+            "timestamp": datetime.now().isoformat(),
+            "error_stage": None,
+            "error_reason": None
+        }
+        
+        try:
+            # STEP 1: 加载Pipeline规范
+            pipeline_config = self.config_loader.get_pipeline_config(pipeline_name)
+            if not pipeline_config:
+                error_info["error_stage"] = "config_loading"
+                error_info["error_reason"] = f"Pipeline '{pipeline_name}' 不存在"
+                print(f"[WARNING] {error_info['error_reason']}，跳过")
+                return None, error_info
+            
+            # STEP 2: 对象选择（如果需要）
+            selected_object = None
+            if pipeline_config.get("object_grounding"):
+                try:
+                    selected_object = await self.object_selector.select_object_async(
+                        image_base64=image_base64,
+                        pipeline_config=pipeline_config,
+                        global_policy=self.object_selection_policy,
+                        async_client=async_client,
+                        model=model
+                    )
+                    
+                    if selected_object is None:
+                        # 根据策略，如果对象选择失败则丢弃
+                        if self.object_selection_policy.get("fallback_strategy") == "discard_image":
+                            error_info["error_stage"] = "object_selection"
+                            error_info["error_reason"] = "无法选择对象"
+                            print(f"[INFO] 无法为pipeline '{pipeline_name}' 选择对象，丢弃样本")
+                            return None, error_info
+                except Exception as e:
+                    error_info["error_stage"] = "object_selection"
+                    error_info["error_reason"] = f"对象选择过程出错: {str(e)}"
+                    print(f"[ERROR] {error_info['error_reason']}")
+                    return None, error_info
+            
+            # STEP 3: 槽位填充
+            try:
+                slots = await self.slot_filler.fill_slots_async(
+                    image_base64=image_base64,
+                    pipeline_config=pipeline_config,
+                    selected_object=selected_object
+                )
+                
+                if slots is None:
+                    error_info["error_stage"] = "slot_filling"
+                    error_info["error_reason"] = "槽位填充失败（必需槽位无法解析）"
+                    print(f"[INFO] 槽位填充失败，丢弃样本")
+                    return None, error_info
+            except Exception as e:
+                error_info["error_stage"] = "slot_filling"
+                error_info["error_reason"] = f"槽位填充过程出错: {str(e)}"
+                print(f"[ERROR] {error_info['error_reason']}")
+                return None, error_info
+            
+            # STEP 4 & 5: 问题生成和验证（带重试机制，最多重试3次）
+            # 按比例选择题型（在try块外初始化，确保在结果中可用）
+            question_type = self._select_question_type()
+            
+            max_retries = 3
+            retry_count = 0
+            question = None
+            is_valid = False
+            reason = ""
+            last_error = None
+            
+            # 最多重试3次（总共尝试4次：初始1次 + 重试3次）
+            # retry_count: 0=初始尝试, 1=第1次重试, 2=第2次重试, 3=第3次重试
+            while retry_count <= max_retries:
+                try:
+                    # 生成问题
+                    question = await self.question_generator.generate_question_async(
+                        image_base64=image_base64,
+                        pipeline_config=pipeline_config,
+                        slots=slots,
+                        selected_object=selected_object,
+                        question_type=question_type,
+                        async_client=async_client,
+                        model=model
+                    )
+                    
+                    if not question:
+                        last_error = "问题生成失败（返回空）"
+                        if retry_count < max_retries:
+                            retry_count += 1
+                            print(f"[重试] 问题生成失败（返回空），正在重试 ({retry_count}/{max_retries})...")
+                            continue
+                        else:
+                            error_info["error_stage"] = "question_generation"
+                            error_info["error_reason"] = f"经过 {max_retries} 次重试后仍失败: {last_error}"
+                            print(f"[INFO] 问题生成失败，已重试 {max_retries} 次，丢弃样本")
+                            return None, error_info
+                    
+                    # 验证问题
+                    is_valid, reason = await self.validator.validate_async(
+                        question=question,
+                        image_base64=image_base64,
+                        pipeline_config=pipeline_config,
+                        global_constraints=self.global_constraints,
+                        async_client=async_client,
+                        model=model
+                    )
+                    
+                    if is_valid:
+                        # 验证通过，退出重试循环
+                        if retry_count > 0:
+                            print(f"[成功] 问题经过 {retry_count} 次重试后验证通过")
+                        break
+                    else:
+                        # 验证失败，需要重试
+                        last_error = f"问题验证失败: {reason}"
+                        if retry_count < max_retries:
+                            retry_count += 1
+                            print(f"[重试] 问题验证失败 ({reason})，正在重新生成 ({retry_count}/{max_retries})...")
+                            continue
+                        else:
+                            error_info["error_stage"] = "validation"
+                            error_info["error_reason"] = f"经过 {max_retries} 次重试后仍验证失败: {reason}"
+                            print(f"[INFO] 问题验证失败，已重试 {max_retries} 次，丢弃样本")
+                            return None, error_info
+                            
+                except Exception as e:
+                    last_error = f"问题生成或验证过程出错: {str(e)}"
+                    if retry_count < max_retries:
+                        retry_count += 1
+                        print(f"[重试] 问题生成或验证异常: {str(e)}，正在重试 ({retry_count}/{max_retries})...")
+                        continue
+                    else:
+                        error_info["error_stage"] = "question_generation" if question is None else "validation"
+                        error_info["error_reason"] = f"经过 {max_retries} 次重试后仍失败: {str(e)}"
+                        print(f"[ERROR] {error_info['error_reason']}")
+                        return None, error_info
+            
+            # 如果所有重试都失败，返回错误
+            if not question or not is_valid:
+                error_info["error_stage"] = "question_generation" if not question else "validation"
+                error_info["error_reason"] = last_error or "问题生成或验证失败"
+                return None, error_info
+            
+            # STEP 6: 输出
+            result = {
+                "pipeline_name": pipeline_name,
+                "pipeline_intent": pipeline_config.get("intent", ""),
+                "question": question,
+                "question_type": question_type,  # 添加题型字段
+                "answer_type": pipeline_config.get("answer_type", ""),
+                "slots": slots,
+                "selected_object": selected_object,
+                "validation_reason": reason,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            return result, None
+            
+        except Exception as e:
+            error_info["error_stage"] = "unknown"
+            error_info["error_reason"] = f"未知错误: {str(e)}"
+            print(f"[ERROR] {error_info['error_reason']}")
+            return None, error_info
+    
+    async def process_data_file_async(
+        self,
+        input_file: Path,
+        output_file: Path,
+        pipeline_names: Optional[List[str]] = None,
+        max_samples: Optional[int] = None,
+        num_gpus: int = 1,
+        max_concurrent_per_gpu: int = 10,
+        request_delay: float = 0.1
+    ) -> None:
+        """
+        异步处理数据文件，为每张图片生成VQA问题（并行版本）
+        
+        Args:
+            input_file: 输入JSON文件路径（batch_process.sh的输出）
+            output_file: 输出JSON文件路径
+            pipeline_names: 要使用的pipeline列表（None表示使用所有）
+            max_samples: 最大处理样本数（None表示全部）
+            num_gpus: GPU数量（用于进程隔离，实际是API并发控制）
+            max_concurrent_per_gpu: 每个GPU的最大并发数
+            request_delay: 每个请求之间的延迟（秒）
+        """
+        print(f"[INFO] 读取输入文件: {input_file}")
+        with open(input_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        if not isinstance(data, list):
+            raise ValueError(f"输入文件应该包含一个数组，但得到: {type(data)}")
+        
+        # 确定要使用的pipeline
+        if pipeline_names is None:
+            pipeline_names = self.config_loader.list_pipelines()
+        
+        print(f"[INFO] 使用pipelines: {pipeline_names}")
+        print(f"[INFO] 总记录数: {len(data)}")
+        
+        if max_samples:
+            data = data[:max_samples]
+            print(f"[INFO] 限制处理前 {max_samples} 条记录")
+        
+        # 准备任务列表
+        tasks = []
+        for idx, record in enumerate(data, 1):
+            source_a = record.get("source_a", {})
+            if not source_a:
+                continue
+            
+            # 提取图片输入
+            image_base64 = self._extract_image_base64(source_a, self._extract_image_input(source_a))
+            if image_base64 is None:
+                continue
+            
+            # 确定该记录应该使用的pipeline
+            record_pipeline = self._extract_pipeline_from_record(record)
+            
+            # 如果记录中指定了pipeline，使用指定的；否则使用传入的pipeline_names
+            if record_pipeline:
+                pipelines_to_use = [record_pipeline]
+            else:
+                pipelines_to_use = pipeline_names if pipeline_names else self.config_loader.list_pipelines()
+            
+            # 为每个pipeline创建任务
+            for pipeline_name in pipelines_to_use:
+                tasks.append({
+                    "record_index": idx,
+                    "record": record,
+                    "image_base64": image_base64,
+                    "pipeline_name": pipeline_name,
+                    "source_a": source_a
+                })
+        
+        print(f"[INFO] 共 {len(tasks)} 个任务，开始异步并行处理")
+        print(f"[INFO] GPU数量: {num_gpus}, 每GPU并发数: {max_concurrent_per_gpu}")
+        
+        # 使用多GPU异步处理
+        results = await self._process_tasks_async(
+            tasks=tasks,
+            num_gpus=num_gpus,
+            max_concurrent_per_gpu=max_concurrent_per_gpu,
+            request_delay=request_delay
+        )
+        
+        # 分离成功结果和错误
+        success_results = []
+        errors = []
+        
+        for result, error_info in results:
+            if result:
+                success_results.append(result)
+            else:
+                errors.append(error_info)
+        
+        # 保存成功结果
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(success_results, f, ensure_ascii=False, indent=2)
+        
+        # 保存错误和丢弃的数据（带时间戳）
+        if errors:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            error_file = output_file.parent / f"{output_file.stem}_errors_{timestamp}.json"
+            with open(error_file, 'w', encoding='utf-8') as f:
+                json.dump(errors, f, ensure_ascii=False, indent=2)
+            print(f"  错误/丢弃数据已保存到: {error_file}")
+        
+        print(f"\n[完成] 处理完成！")
+        print(f"  总处理: {len(results)}")
+        print(f"  成功生成: {len(success_results)}")
+        print(f"  丢弃/错误: {len(errors)}")
+        print(f"  结果已保存到: {output_file}")
+    
+    async def _process_tasks_async(
+        self,
+        tasks: List[Dict[str, Any]],
+        num_gpus: int = 1,
+        max_concurrent_per_gpu: int = 10,
+        request_delay: float = 0.1
+    ) -> List[tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]]:
+        """
+        异步并行处理任务列表
+        
+        Args:
+            tasks: 任务列表
+            num_gpus: GPU数量
+            max_concurrent_per_gpu: 每个GPU的最大并发数
+            request_delay: 每个请求之间的延迟（秒）
+            
+        Returns:
+            结果列表，每个元素是 (成功结果, 错误信息) 的元组
+        """
+        # 将任务分配到不同的GPU组
+        tasks_per_gpu = len(tasks) // num_gpus if num_gpus > 1 else len(tasks)
+        gpu_tasks = []
+        
+        for gpu_id in range(num_gpus):
+            start_idx = gpu_id * tasks_per_gpu
+            if gpu_id == num_gpus - 1:
+                end_idx = len(tasks)  # 最后一个GPU处理剩余所有任务
+            else:
+                end_idx = (gpu_id + 1) * tasks_per_gpu
+            
+            gpu_tasks.append((gpu_id, tasks[start_idx:end_idx]))
+        
+        # 为每个GPU创建处理任务
+        async def process_gpu_tasks(gpu_id: int, gpu_task_list: List[Dict]):
+            """处理单个GPU的任务"""
+            results = []
+            async with AsyncGeminiClient(
+                gpu_id=gpu_id,
+                max_concurrent=max_concurrent_per_gpu,
+                request_delay=request_delay
+            ) as async_client:
+                # 创建所有异步任务
+                async_task_list = []
+                for task in gpu_task_list:
+                    async_task = self.process_image_pipeline_pair_async(
+                        image_base64=task["image_base64"],
+                        pipeline_name=task["pipeline_name"],
+                        metadata={
+                            "record_index": task["record_index"],
+                            "id": task["record"].get("id")
+                        },
+                        async_client=async_client,
+                        model=async_client.model_name
+                    )
+                    async_task_list.append(async_task)
+                
+                # 等待所有任务完成（使用return_exceptions=True以处理异常）
+                task_results = await asyncio.gather(*async_task_list, return_exceptions=True)
+                
+                # 处理结果和异常
+                for i, task_result in enumerate(task_results):
+                    if isinstance(task_result, Exception):
+                        # 异常情况，创建错误信息
+                        error_info = {
+                            "pipeline_name": gpu_task_list[i]["pipeline_name"],
+                            "metadata": {
+                                "record_index": gpu_task_list[i]["record_index"],
+                                "id": gpu_task_list[i]["record"].get("id")
+                            },
+                            "timestamp": datetime.now().isoformat(),
+                            "error_stage": "unknown",
+                            "error_reason": f"处理异常: {str(task_result)}",
+                            "sample_index": gpu_task_list[i]["record"].get("sample_index"),
+                            "id": gpu_task_list[i]["record"].get("id"),
+                            "source_a_id": gpu_task_list[i]["source_a"].get("id")
+                        }
+                        results.append((None, error_info))
+                    else:
+                        # 正常情况，提取结果
+                        result, error_info = task_result
+                        if result:
+                            # 添加原始数据信息
+                            result["sample_index"] = gpu_task_list[i]["record"].get("sample_index")
+                            result["id"] = gpu_task_list[i]["record"].get("id")
+                            result["source_a_id"] = gpu_task_list[i]["source_a"].get("id")
+                            result["image_base64"] = gpu_task_list[i]["image_base64"]
+                            results.append((result, None))
+                        else:
+                            # 失败情况，添加元数据到错误信息
+                            if error_info:
+                                error_info["sample_index"] = gpu_task_list[i]["record"].get("sample_index")
+                                error_info["id"] = gpu_task_list[i]["record"].get("id")
+                                error_info["source_a_id"] = gpu_task_list[i]["source_a"].get("id")
+                            results.append((None, error_info))
+                
+                # 进度报告
+                completed = len(results)
+                success_count = sum(1 for r, e in results if r is not None)
+                if completed > 0 and completed % 10 == 0:
+                    print(f"[进度] GPU {gpu_id}: 已处理: {completed}, 成功: {success_count}")
+            
+            return results
+        
+        # 并发处理所有GPU的任务
+        all_results = await asyncio.gather(*[
+            process_gpu_tasks(gpu_id, task_list)
+            for gpu_id, task_list in gpu_tasks
+        ])
+        
+        # 合并结果
+        final_results = []
+        for gpu_results in all_results:
+            final_results.extend(gpu_results)
+        
+        return final_results
 

@@ -39,12 +39,16 @@ GEMINI_MODEL = MODEL_NAME
 PIPELINE_CONFIG = {
     "question": {
         "name": "Question Pipeline",
-        "description": "Object recognition + concept matching",
-        "question": "Which term matches the picture?",
+        "description": "Concept grounding and term matching",
+        "question": "Which term best matches the concept conveyed by the image?",
         "criteria": [
-            "Exactly one primary object is present in the image",
-            "Primary object exhibits visually identifiable features that correspond to the target concept",
-            "Object boundaries are visually clear and separable from the background"
+            "The image conveys a clear and identifiable concept, category, or property that can be named by a single term",
+            "The concept is intrinsic to the depicted content, rather than dependent on superficial visual appearance",
+            "The concept can be inferred from the image content without relying on external textual context",
+            "[optional] Multiple objects are present but collectively support the same underlying concept",
+            "[optional] The image contains a strong semantic anchor that explicitly reinforces the target concept",
+            "[optional] The concept is abstract, relational, or attribute-based rather than a concrete object label",
+            "[optional] The concept is not immediately obvious and requires non-trivial semantic inference"
         ]
     },
 
@@ -67,40 +71,45 @@ PIPELINE_CONFIG = {
         "description": "Geographic location identification",
         "question": "What is the name of the place shown?",
         "criteria": [
-            "Image shows a real and non-fictional geographic location",
-            "Map-style image includes a visually highlighted target region",
-            "Highlighted region is positioned near the image center",
-            "Highlighted region occupies at least half of the image area",
-            "Location identity can be inferred from visual information alone without external text"
+            "Image depicts a real-world, non-fictional geographic location represented in map form",
+            "The map contains a visually salient and deliberately highlighted region that can plausibly serve as the target location",
+            "The highlighted region is perceptually distinct from the surrounding map context",
+            "The map provides sufficient geographic cues—primarily the shape of the highlighted region and its surrounding spatial context—to support location inference, even when the place name cannot be directly obtained from the image alone",
+            "[optional] Identifying the location requires external geographic knowledge beyond what is explicitly visible in the image",
+            "[optional] The map contains minimal textual labels or place names, avoiding trivial identification through reading",
+            "[optional] The map may exhibit mild geometric or scale distortion that increases difficulty without obscuring essential geographic structure"
         ]
     },
 
     "text_association": {
         "name": "Text Association Pipeline",
-        "description": "Image and text correlation",
-        "question": "Which can be the associated text with this image posted on twitter?",
+        "description": "Basic image-to-text alignment",
+        "question": "Which text best describes what is shown in the image?",
         "criteria": [
-            "Exactly one primary object is present",
-            "Primary object is positioned near the image center",
-            "Primary object occupies the majority of the image area (approximately 70–80%)",
-            "Primary object is visually salient and unambiguous"
+            "The image contains visually perceivable content that can be reasonably described in natural language",
+            "One or more objects, scenes, or activities are present and can serve as the basis for a textual description",
+            "The image does not rely on extensive external context to be meaningfully described",
+            "[optional] The image has a loosely identifiable main subject or scene",
+            "[optional] The image supports a generally consistent description across different viewers, even if interpretations vary in detail",
+            "[optional] The image is not severely abstract, noisy, or visually degraded to the extent that description becomes unreliable"
         ]
     },
 
     "object_proportion": {
         "name": "Object Proportion Pipeline",
         "description": "Object size proportion in image",
-        "question": "Approximately what proportion of the picture is occupied by [object]?",
+        "question": "Approximately what proportion of the picture is occupied by [potential target]?",
         "criteria": [
-            "Image contains at least one visually salient object category that can serve as a potential target, even if not explicitly specified in the query",
-            "Target object is complete or sufficiently recognizable for size estimation",
-            "Image is not fully dominated by a single object covering nearly the entire frame",
-            "Target object boundaries are visually discernible",
-            "Target object category is clearly defined without conceptual ambiguity",
-            "[optional] Target object may be absent from the image, requiring a zero-proportion judgment"
+            "Image contains at least one visually salient object category that can plausibly serve as a potential target, even if not explicitly specified in the query",
+            "Potential target object is complete or sufficiently recognizable to allow approximate size estimation",
+            "The image is not overwhelmingly dominated by a single potential target object covering nearly the entire frame",
+            "Potential target object boundaries are visually discernible for proportion assessment",
+            "Potential target object category is unambiguous and conceptually clear",
+            "[optional] The potential target object may be absent from the image, requiring a zero-proportion judgment",
+            "[optional] The image contains multiple instances of the potential target object or complex arrangements that increase proportion estimation difficulty",
+            "[optional] The potential target object occupies a small or partial region, making size estimation more challenging"
         ]
     },
-
     "object_position": {
         "name": "Object Position Pipeline",
         "description": "Object location in image",
@@ -122,10 +131,10 @@ PIPELINE_CONFIG = {
         "question": "Which corner doesn't have any [objects]?",
         "criteria": [
             "Image contains at least one visually salient object category that can serve as a potential target, even if not explicitly specified in the query",
-            "Objects in the image have visually clear boundaries",
-            "Objects occupy a substantial portion of the image area",
-            "Target object category is clearly defined",
-            "Image can be partitioned into distinct and identifiable spatial regions (e.g., four corners)"
+            "At least one type of potential target objects in the image has visually clear and contiguous boundaries",
+            "Potential target objects occupy a sufficiently large and contiguous area of the image, rather than appearing as small or isolated instances",
+            "When the image is partitioned into predefined spatial regions (e.g., four corners), potential target objects are present in at least two regions",
+            "At most two spatial regions may be completely absent of potential target objects"
         ]
     },
 
@@ -135,8 +144,7 @@ PIPELINE_CONFIG = {
         "question": "In the picture, which direction is this [object] facing?",
         "criteria": [
             "Image contains at least one visually salient object that can serve as a target instance, even if the query does not explicitly specify the object",
-            "Target object has an identifiable front, head, or directional indicator",
-            "Question refers to a single target object instance",
+            "The potential target object belongs to a category that is inherently directional, rather than orientation-neutral, regardless of whether the direction is visually salient",
             "[optional] Target object occupies a small portion of the image",
             "[optional] Target object is partially occluded or visually blurred",
             "[optional] Image contains interacting or overlapping objects requiring disambiguation",
@@ -164,6 +172,129 @@ PIPELINE_CONFIG = {
         ]
     }
 }
+# PIPELINE_CONFIG = {
+#     "question": {
+#         "name": "Question Pipeline",
+#         "description": "Object recognition + concept matching",
+#         "question": "Which term matches the picture?",
+#         "criteria": [
+#             "Contains a single primary object",
+#             "Object has identifiable features corresponding to the concept (e.g., bubbles for 'thermal convection')",
+#             "Object boundaries are clear and recognizable"
+#         ]
+#     },
+    
+#     "caption": {
+#         "name": "Caption Pipeline",
+#         "description": "Scene description/caption",
+#         "question": "Which one is the correct caption of this image?",
+#         "criteria": [
+#             "Must be a real-world scene (photograph, not illustration)",
+#             "Contains multiple objects of different types",
+#             "Objects have distinguishable positions and spatial relationships",
+#             "Objects fit the background environment and show context-appropriate usage",
+#             "Most objects are mostly complete and unobstructed",
+#             "Empty space does not exceed 1/3 of the image"
+#         ]
+#     },
+    
+#     "place_recognition": {
+#         "name": "Place Recognition Pipeline",
+#         "description": "Geographic location identification",
+#         "question": "What is the name of the place shown?",
+#         "criteria": [
+#             "Shows a real geographic location (fictional scenes are not acceptable)",
+#             "Map contains highlighted or darkened area indicating the target region",
+#             "Map region is positioned at the center of the image",
+#             "Map region occupies at least 1/2 of the total image area",
+#             "Location must be identifiable from the visual information alone"
+#         ]
+#     },
+    
+#     "text_association": {
+#         "name": "Text Association Pipeline",
+#         "description": "Image and text correlation",
+#         "question": "Which can be the associated text with this image posted on twitter?",
+#         "criteria": [
+#             "Contains a single primary object",
+#             "Target object is positioned at the image center",
+#             "Target object occupies approximately 80% of the image space",
+#             "Object is clearly identifiable and prominent"
+#         ]
+#     },
+    
+#     "object_proportion": {
+#         "name": "Object Proportion Pipeline",
+#         "description": "Object size proportion in image",
+#         "question": "Approximately what proportion of the picture is occupied by [object]?",
+#         "criteria": [
+#             "Image contains a complete or sufficiently recognizable target object",
+#             "Image is not completely dominated by a single object",
+#             "Object boundaries are clearly visible",
+#             "Target object definition is unambiguous (no conceptual edge cases)",
+#             "Target object may not exist in the image (model must handle this case)"
+#         ]
+#     },
+    
+#     "object_position": {
+#         "name": "Object Position Pipeline",
+#         "description": "Object location in image",
+#         "question": "Where is the [object] located in the picture?",
+#         "criteria": [
+#             "Target object has clear boundaries in the image (boundaries need not be complete)",
+#             "Object count is 1 or can be treated as a single unit",
+#             "Image may contain distractors highly similar to the target object",
+#             "Target object may occupy only a small portion of the image",
+#             "Target object may show only partial features (body parts, color, silhouette)",
+#             "Target object may be in shadows, background, corners, or partially occluded"
+#         ]
+#     },
+    
+#     "object_absence": {
+#         "name": "Object Absence Pipeline",
+#         "description": "Identifying areas without certain objects",
+#         "question": "Which corner doesn't have any [objects]?",
+#         "criteria": [
+#             "Objects in the image have clear boundaries",
+#             "Objects occupy the majority of the image space",
+#             "Target object type is clearly defined",
+#             "Image is divided into identifiable regions (e.g., corners)"
+#         ]
+#     },
+    
+#     "object_orientation": {
+#         "name": "Object Orientation Pipeline",
+#         "description": "Object facing direction",
+#         "question": "In the picture, which direction is this [object] facing?",
+#         "criteria": [
+#             "Object has a head/front or unique directional indicator (cannot ask about spherical objects)",
+#             "Question refers to a single object (though image may contain distractors)",
+#             "Object may occupy only a small portion of the image",
+#             "Object may be partially occluded or blurred",
+#             "Object may interact with other objects requiring additional discrimination",
+#             "Direction judgment may require fine-grained precision (e.g., eye gaze direction)"
+#         ]
+#     },
+    
+#     "object_counting": {
+#         "name": "Object Counting Pipeline",
+#         "description": "Counting objects in image",
+#         "question": "How many [objects] are in the picture?",
+#         "criteria": [
+#             "Objects are countable with appropriate measure words",
+#             "Objects may show only partial features",
+#             "Image may contain visually similar distractor objects",
+#             "Objects may partially occlude each other",
+#             "Objects may be rotated, inverted, or positioned in obscure locations",
+#             "Objects may blend with background colors",
+#             "Image may contain zero instances of the target object",
+#             "May count multiple similar object types simultaneously",
+#             "Objects may have special packaging/surface decoration/cutting/shaping that alters appearance",
+#             "Image may have low light or other challenging conditions",
+#             "Image may contain reflections/mirrors causing visual confusion"
+#         ]
+#     }
+# }
 
 # 数据路径配置
 DATA_DIR = PROJECT_ROOT / "data"

@@ -4,6 +4,7 @@
 """
 from typing import Dict, Any, Optional
 from utils.gemini_client import GeminiClient
+from utils.async_client import AsyncGeminiClient
 import re
 
 
@@ -147,4 +148,107 @@ Generate a natural, fluent question that follows the template and constraints. R
         question = question.split('\n')[0].strip()
         
         return question
+    
+    async def generate_question_async(
+        self,
+        image_base64: str,
+        pipeline_config: Dict[str, Any],
+        slots: Dict[str, str],
+        selected_object: Optional[Dict[str, Any]] = None,
+        question_type: Optional[str] = None,
+        async_client: Optional[AsyncGeminiClient] = None,
+        model: Optional[str] = None
+    ) -> Optional[str]:
+        """
+        异步生成VQA问题
+        
+        Args:
+            image_base64: 图片的base64编码
+            pipeline_config: Pipeline配置
+            slots: 填充的槽位字典
+            selected_object: 选中的对象信息（如果有）
+            question_type: 题型，可选值："multiple_choice"（选择题）或"fill_in_blank"（填空题）
+            async_client: 异步客户端实例（可选）
+            model: 模型名称（可选）
+            
+        Returns:
+            生成的问题文本，如果生成失败返回None
+        """
+        # 获取配置
+        intent = pipeline_config.get("intent", "")
+        example_template = pipeline_config.get("example_template", "")
+        question_constraints = pipeline_config.get("question_constraints", [])
+        description = pipeline_config.get("description", "")
+        
+        # 构建prompt
+        prompt = self._build_generation_prompt(
+            intent=intent,
+            description=description,
+            example_template=example_template,
+            question_constraints=question_constraints,
+            slots=slots,
+            selected_object=selected_object,
+            question_type=question_type
+        )
+        
+        try:
+            # 构建图像内容（OpenAI兼容格式）
+            image_content = {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/jpeg;base64,{image_base64}"
+                }
+            }
+            
+            text_content = {
+                "type": "text",
+                "text": prompt
+            }
+            
+            # 确定使用的模型名称
+            if model is None:
+                if async_client is not None:
+                    model = async_client.model_name
+                else:
+                    import config
+                    model = config.MODEL_NAME
+            
+            # 使用异步客户端
+            if async_client is None:
+                async with AsyncGeminiClient() as client:
+                    response = await client.chat.completions.create(
+                        model=model,
+                        messages=[
+                            {
+                                "role": "user",
+                                "content": [text_content, image_content]
+                            }
+                        ],
+                        max_tokens=1000,
+                        temperature=0.7,  # 使用较高温度以增加多样性
+                    )
+            else:
+                response = await async_client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [text_content, image_content]
+                        }
+                    ],
+                    max_tokens=1000,
+                    temperature=0.7,  # 使用较高温度以增加多样性
+                )
+            
+            # 提取响应内容
+            response_text = response.choices[0].message.content
+            
+            # 提取问题（可能包含引号或其他格式）
+            question = self._extract_question(response_text)
+            
+            return question
+            
+        except Exception as e:
+            print(f"[WARNING] 异步问题生成失败: {e}")
+            return None
 
