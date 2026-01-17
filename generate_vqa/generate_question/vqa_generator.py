@@ -1155,6 +1155,23 @@ class VQAGenerator:
                             "id": gpu_task_list[i]["record"].get("id"),
                             "source_a_id": gpu_task_list[i]["source_a"].get("id")
                         }
+                        
+                        # 如果是对象选择相关的异常，尝试保存失败案例
+                        if self.failed_selection_dir and "object_selection" in str(task_result).lower():
+                            try:
+                                # 获取pipeline配置
+                                pipeline_config = self.config_loader.get_pipeline_config(gpu_task_list[i]["pipeline_name"])
+                                if pipeline_config:
+                                    self._save_failed_selection_case(
+                                        image_input=gpu_task_list[i]["image_base64"],
+                                        pipeline_config=pipeline_config,
+                                        error_info=error_info,
+                                        metadata=error_info["metadata"],
+                                        selection_result=None
+                                    )
+                            except Exception as save_error:
+                                print(f"[WARNING] 保存异常失败案例时出错: {save_error}")
+                        
                         results.append((None, error_info))
                     else:
                         # 正常情况，提取结果
