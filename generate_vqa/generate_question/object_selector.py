@@ -515,7 +515,12 @@ IMPORTANT: Always return valid JSON format. Never return null or text without JS
                 reason = result.get("reason", "未知原因")
                 confidence = result.get("confidence", 0.0)
                 print(f"[INFO] 对象未选择 - 原因: {reason} (置信度: {confidence})")
-                return None
+                # 返回包含reason的结果，而不是None，以便调用者可以获取reason
+                return {
+                    "selected": False,
+                    "reason": reason,
+                    "confidence": confidence
+                }
             
         except Exception as e:
             print(f"[ERROR] 对象选择异常: {type(e).__name__}: {e}")
@@ -739,7 +744,12 @@ IMPORTANT: Always return valid JSON format. Never return null or text without JS
                 reason = result.get("reason", "未知原因")
                 confidence = result.get("confidence", 0.0)
                 print(f"[INFO] 异步对象未选择 - 原因: {reason} (置信度: {confidence})")
-                return None
+                # 返回包含reason的结果，而不是None，以便调用者可以获取reason
+                return {
+                    "selected": False,
+                    "reason": reason,
+                    "confidence": confidence
+                }
             
         except Exception as e:
             print(f"[ERROR] 异步对象选择异常: {type(e).__name__}: {e}")

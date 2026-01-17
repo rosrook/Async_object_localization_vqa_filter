@@ -109,11 +109,18 @@ class VQAGenerator:
                         global_policy=self.object_selection_policy
                     )
                     
-                    if selected_object is None:
+                    # 检查对象选择是否失败（包括返回None或selected=False）
+                    if selected_object is None or selected_object.get("selected") == False:
                         # 根据策略，如果对象选择失败则丢弃
                         if self.object_selection_policy.get("fallback_strategy") == "discard_image":
                             error_info["error_stage"] = "object_selection"
-                            error_info["error_reason"] = "无法选择对象"
+                            # 从对象选择器的响应中获取reason（如果存在）
+                            if selected_object and selected_object.get("reason"):
+                                error_info["error_reason"] = f"无法选择对象: {selected_object.get('reason')}"
+                                error_info["model_reason"] = selected_object.get("reason")  # 保存模型的reason
+                                error_info["confidence"] = selected_object.get("confidence", 0.0)
+                            else:
+                                error_info["error_reason"] = "无法选择对象"
                             
                             # 保存失败案例
                             if self.failed_selection_dir:
@@ -122,7 +129,8 @@ class VQAGenerator:
                                     image_input=image_input,
                                     pipeline_config=pipeline_config,
                                     error_info=error_info,
-                                    metadata=metadata
+                                    metadata=metadata,
+                                    selection_result=selected_object  # 传递选择结果以获取reason
                                 )
                             else:
                                 print(f"[DEBUG] 跳过保存失败案例，failed_selection_dir 为 None")
@@ -140,7 +148,8 @@ class VQAGenerator:
                             image_input=image_input,
                             pipeline_config=pipeline_config,
                             error_info=error_info,
-                            metadata=metadata
+                            metadata=metadata,
+                            selection_result=None  # 异常情况下没有选择结果
                         )
                     else:
                         print(f"[DEBUG] 跳过保存失败案例（异常），failed_selection_dir 为 None")
@@ -570,7 +579,8 @@ class VQAGenerator:
         image_input: Any,
         pipeline_config: Dict[str, Any],
         error_info: Dict[str, Any],
-        metadata: Optional[Dict[str, Any]] = None
+        metadata: Optional[Dict[str, Any]] = None,
+        selection_result: Optional[Dict[str, Any]] = None
     ) -> None:
         """
         保存对象选择失败的案例到子文件夹
@@ -608,7 +618,7 @@ class VQAGenerator:
             except Exception as e:
                 print(f"[WARNING] 保存失败案例图片失败: {e}")
             
-            # 2. 保存错误信息JSON
+            # 2. 保存错误信息JSON（包含模型的reason）
             error_json_path = case_dir / "error_info.json"
             error_data = {
                 "case_id": case_id,
@@ -623,6 +633,15 @@ class VQAGenerator:
                 "error_reason": error_info.get("error_reason"),
                 "metadata": metadata or {}
             }
+            
+            # 如果selection_result存在，保存模型的reason和confidence
+            if selection_result:
+                if selection_result.get("reason"):
+                    error_data["model_reason"] = selection_result.get("reason")
+                    error_data["model_confidence"] = selection_result.get("confidence", 0.0)
+                # 保存完整的选择结果
+                error_data["selection_result"] = selection_result
+            
             with open(error_json_path, 'w', encoding='utf-8') as f:
                 json.dump(error_data, f, ensure_ascii=False, indent=2)
             
@@ -670,22 +689,35 @@ class VQAGenerator:
                 
                 # 如果是base64字符串
                 if isinstance(image_input, str) and len(image_input) > 50:
+                    image_data = None
                     # 检查是否是base64
                     if image_input.startswith("data:image"):
-                        # 提取base64部分
+                        # 提取base64部分: data:image/jpeg;base64,xxxxx
                         match = re.search(r'base64,(.+)', image_input)
                         if match:
-                            image_data = base64.b64decode(match.group(1))
+                            try:
+                                image_data = base64.b64decode(match.group(1))
+                            except Exception as e:
+                                print(f"[WARNING] 解码data:image格式的base64失败: {e}")
+                                return None
                         else:
                             return None
                     else:
-                        # 尝试直接解码base64
+                        # 尝试直接解码base64（纯base64字符串）
                         try:
-                            image_data = base64.b64decode(image_input)
-                        except:
+                            # 移除可能的空白字符
+                            clean_base64 = image_input.strip()
+                            image_data = base64.b64decode(clean_base64)
+                        except Exception as e:
+                            print(f"[WARNING] 解码base64字符串失败: {e}")
                             return None
                     
-                    return Image.open(io.BytesIO(image_data))
+                    if image_data:
+                        try:
+                            return Image.open(io.BytesIO(image_data))
+                        except Exception as e:
+                            print(f"[WARNING] 从bytes创建PIL Image失败: {e}")
+                            return None
             
             # 如果是bytes
             if isinstance(image_input, bytes):
@@ -757,11 +789,18 @@ class VQAGenerator:
                         model=model
                     )
                     
-                    if selected_object is None:
+                    # 检查对象选择是否失败（包括返回None或selected=False）
+                    if selected_object is None or selected_object.get("selected") == False:
                         # 根据策略，如果对象选择失败则丢弃
                         if self.object_selection_policy.get("fallback_strategy") == "discard_image":
                             error_info["error_stage"] = "object_selection"
-                            error_info["error_reason"] = "无法选择对象"
+                            # 从对象选择器的响应中获取reason（如果存在）
+                            if selected_object and selected_object.get("reason"):
+                                error_info["error_reason"] = f"无法选择对象: {selected_object.get('reason')}"
+                                error_info["model_reason"] = selected_object.get("reason")  # 保存模型的reason
+                                error_info["confidence"] = selected_object.get("confidence", 0.0)
+                            else:
+                                error_info["error_reason"] = "无法选择对象"
                             
                             # 保存失败案例（异步版本，使用base64）
                             if self.failed_selection_dir:
@@ -769,7 +808,8 @@ class VQAGenerator:
                                     image_input=image_base64,
                                     pipeline_config=pipeline_config,
                                     error_info=error_info,
-                                    metadata=metadata
+                                    metadata=metadata,
+                                    selection_result=selected_object  # 传递选择结果以获取reason
                                 )
                             
                             print(f"[INFO] 无法为pipeline '{pipeline_name}' 选择对象，丢弃样本")
@@ -784,7 +824,8 @@ class VQAGenerator:
                             image_input=image_base64,
                             pipeline_config=pipeline_config,
                             error_info=error_info,
-                            metadata=metadata
+                            metadata=metadata,
+                            selection_result=None  # 异常情况下没有选择结果
                         )
                     
                     print(f"[ERROR] {error_info['error_reason']}")
