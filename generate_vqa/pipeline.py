@@ -612,11 +612,14 @@ class VQAPipeline:
                     else:
                         # 使用同步方法（兼容模式）
                         print(f"[INFO] 使用同步生成问题")
+                        # 设置失败案例目录（在输出目录下创建子目录）
+                        failed_selection_dir = batch_questions_file.parent / "failed_selection"
                         self.question_generator.process_data_file(
                             input_file=batch_input_file,
                             output_file=batch_questions_file,
                             pipeline_names=pipeline_names,
-                            max_samples=None  # 批次文件已经限制大小
+                            max_samples=None,  # 批次文件已经限制大小
+                            failed_selection_dir=failed_selection_dir
                         )
                     
                     # 读取生成的问题

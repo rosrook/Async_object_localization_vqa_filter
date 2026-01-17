@@ -6,9 +6,12 @@ import json
 import re
 import random
 import asyncio
+import base64
+import io
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from datetime import datetime
+from PIL import Image
 
 from .config_loader import ConfigLoader
 from .object_selector import ObjectSelector
@@ -22,13 +25,15 @@ from utils.async_client import AsyncGeminiClient
 class VQAGenerator:
     """VQA问题生成器主类"""
     
-    def __init__(self, config_path: Path, gemini_client: Optional[GeminiClient] = None):
+    def __init__(self, config_path: Path, gemini_client: Optional[GeminiClient] = None,
+                 failed_selection_dir: Optional[Path] = None):
         """
         初始化VQA生成器
         
         Args:
             config_path: 配置文件路径
             gemini_client: Gemini客户端实例（可选）
+            failed_selection_dir: 失败案例存储目录（可选，如果为None则不保存）
         """
         self.config_loader = ConfigLoader(config_path)
         self.gemini_client = gemini_client or GeminiClient()
@@ -44,6 +49,11 @@ class VQAGenerator:
         self.object_selection_policy = self.config_loader.get_object_selection_policy()
         self.generation_policy = self.config_loader.get_generation_policy()
         self.question_type_ratio = self.config_loader.get_question_type_ratio()
+        
+        # 失败案例存储目录
+        self.failed_selection_dir = failed_selection_dir
+        if self.failed_selection_dir:
+            self.failed_selection_dir.mkdir(parents=True, exist_ok=True)
     
     def process_image_pipeline_pair(
         self,
@@ -104,11 +114,31 @@ class VQAGenerator:
                         if self.object_selection_policy.get("fallback_strategy") == "discard_image":
                             error_info["error_stage"] = "object_selection"
                             error_info["error_reason"] = "无法选择对象"
+                            
+                            # 保存失败案例
+                            if self.failed_selection_dir:
+                                self._save_failed_selection_case(
+                                    image_input=image_input,
+                                    pipeline_config=pipeline_config,
+                                    error_info=error_info,
+                                    metadata=metadata
+                                )
+                            
                             print(f"[INFO] 无法为pipeline '{pipeline_name}' 选择对象，丢弃样本")
                             return None, error_info
                 except Exception as e:
                     error_info["error_stage"] = "object_selection"
                     error_info["error_reason"] = f"对象选择过程出错: {str(e)}"
+                    
+                    # 保存失败案例
+                    if self.failed_selection_dir:
+                        self._save_failed_selection_case(
+                            image_input=image_input,
+                            pipeline_config=pipeline_config,
+                            error_info=error_info,
+                            metadata=metadata
+                        )
+                    
                     print(f"[ERROR] {error_info['error_reason']}")
                     return None, error_info
             
@@ -201,7 +231,8 @@ class VQAGenerator:
         input_file: Path,
         output_file: Path,
         pipeline_names: Optional[List[str]] = None,
-        max_samples: Optional[int] = None
+        max_samples: Optional[int] = None,
+        failed_selection_dir: Optional[Path] = None
     ) -> None:
         """
         处理数据文件，为每张图片生成VQA问题
@@ -211,7 +242,19 @@ class VQAGenerator:
             output_file: 输出JSON文件路径
             pipeline_names: 要使用的pipeline列表（None表示使用所有）
             max_samples: 最大处理样本数（None表示全部）
+            failed_selection_dir: 失败案例存储目录（可选，如果为None且self.failed_selection_dir也为None则不保存）
         """
+        # 如果传入了failed_selection_dir，使用它；否则使用初始化时设置的
+        if failed_selection_dir is not None:
+            self.failed_selection_dir = failed_selection_dir
+            self.failed_selection_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 如果没有设置失败案例目录，使用输出目录的子目录
+        if self.failed_selection_dir is None:
+            self.failed_selection_dir = output_file.parent / "failed_selection"
+            self.failed_selection_dir.mkdir(parents=True, exist_ok=True)
+            print(f"[INFO] 失败案例将保存到: {self.failed_selection_dir}")
+        
         print(f"[INFO] 读取输入文件: {input_file}")
         with open(input_file, 'r', encoding='utf-8') as f:
             data = json.load(f)
@@ -515,6 +558,135 @@ class VQAGenerator:
                     return image_input
         
         return None
+    
+    def _save_failed_selection_case(
+        self,
+        image_input: Any,
+        pipeline_config: Dict[str, Any],
+        error_info: Dict[str, Any],
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """
+        保存对象选择失败的案例到子文件夹
+        
+        Args:
+            image_input: 图片输入（base64、路径、bytes等）
+            pipeline_config: Pipeline配置
+            error_info: 错误信息
+            metadata: 元数据
+        """
+        if not self.failed_selection_dir:
+            return
+        
+        try:
+            # 生成案例ID（基于时间戳和记录ID）
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # 毫秒级时间戳
+            record_id = metadata.get("id", "unknown") if metadata else "unknown"
+            pipeline_name = pipeline_config.get("name", error_info.get("pipeline_name", "unknown"))
+            case_id = f"{timestamp}_{record_id}"
+            
+            # 创建案例子目录
+            case_dir = self.failed_selection_dir / case_id
+            case_dir.mkdir(parents=True, exist_ok=True)
+            
+            # 1. 保存图片（JPG格式）
+            image_path = case_dir / "image.jpg"
+            try:
+                image = self._load_image_from_input(image_input)
+                if image:
+                    image.save(image_path, "JPEG", quality=95)
+                    print(f"[INFO] 已保存失败案例图片: {image_path}")
+            except Exception as e:
+                print(f"[WARNING] 保存失败案例图片失败: {e}")
+            
+            # 2. 保存错误信息JSON
+            error_json_path = case_dir / "error_info.json"
+            error_data = {
+                "case_id": case_id,
+                "timestamp": datetime.now().isoformat(),
+                "pipeline_name": pipeline_name,
+                "pipeline_config": {
+                    "intent": pipeline_config.get("intent"),
+                    "description": pipeline_config.get("description"),
+                    "object_grounding": pipeline_config.get("object_grounding")
+                },
+                "error_stage": error_info.get("error_stage"),
+                "error_reason": error_info.get("error_reason"),
+                "metadata": metadata or {}
+            }
+            with open(error_json_path, 'w', encoding='utf-8') as f:
+                json.dump(error_data, f, ensure_ascii=False, indent=2)
+            
+            # 3. 保存完整的Pipeline配置
+            config_json_path = case_dir / "pipeline_config.json"
+            with open(config_json_path, 'w', encoding='utf-8') as f:
+                json.dump(pipeline_config, f, ensure_ascii=False, indent=2)
+            
+            # 4. 保存对象选择策略配置
+            policy_json_path = case_dir / "selection_policy.json"
+            policy_data = {
+                "object_selection_policy": self.object_selection_policy,
+                "global_constraints": self.global_constraints
+            }
+            with open(policy_json_path, 'w', encoding='utf-8') as f:
+                json.dump(policy_data, f, ensure_ascii=False, indent=2)
+            
+            print(f"[INFO] 已保存失败案例到: {case_dir}")
+            
+        except Exception as e:
+            print(f"[ERROR] 保存失败案例时出错: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _load_image_from_input(self, image_input: Any) -> Optional[Image.Image]:
+        """
+        从各种格式的输入加载PIL图片
+        
+        Args:
+            image_input: 图片输入（base64、路径、bytes、PIL.Image等）
+            
+        Returns:
+            PIL Image对象，如果加载失败返回None
+        """
+        try:
+            # 如果已经是PIL Image，直接返回
+            if isinstance(image_input, Image.Image):
+                return image_input.copy()
+            
+            # 如果是路径字符串
+            if isinstance(image_input, (str, Path)):
+                path = Path(image_input)
+                if path.exists() and path.is_file():
+                    return Image.open(path)
+                
+                # 如果是base64字符串
+                if isinstance(image_input, str) and len(image_input) > 50:
+                    # 检查是否是base64
+                    if image_input.startswith("data:image"):
+                        # 提取base64部分
+                        match = re.search(r'base64,(.+)', image_input)
+                        if match:
+                            image_data = base64.b64decode(match.group(1))
+                        else:
+                            return None
+                    else:
+                        # 尝试直接解码base64
+                        try:
+                            image_data = base64.b64decode(image_input)
+                        except:
+                            return None
+                    
+                    return Image.open(io.BytesIO(image_data))
+            
+            # 如果是bytes
+            if isinstance(image_input, bytes):
+                return Image.open(io.BytesIO(image_input))
+            
+            return None
+            
+        except Exception as e:
+            print(f"[WARNING] 加载图片失败: {e}")
+            return None
     
     async def process_image_pipeline_pair_async(
         self,
