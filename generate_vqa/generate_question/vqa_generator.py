@@ -117,12 +117,15 @@ class VQAGenerator:
                             
                             # 保存失败案例
                             if self.failed_selection_dir:
+                                print(f"[DEBUG] 准备保存失败案例，failed_selection_dir: {self.failed_selection_dir}")
                                 self._save_failed_selection_case(
                                     image_input=image_input,
                                     pipeline_config=pipeline_config,
                                     error_info=error_info,
                                     metadata=metadata
                                 )
+                            else:
+                                print(f"[DEBUG] 跳过保存失败案例，failed_selection_dir 为 None")
                             
                             print(f"[INFO] 无法为pipeline '{pipeline_name}' 选择对象，丢弃样本")
                             return None, error_info
@@ -132,12 +135,15 @@ class VQAGenerator:
                     
                     # 保存失败案例
                     if self.failed_selection_dir:
+                        print(f"[DEBUG] 准备保存失败案例（异常），failed_selection_dir: {self.failed_selection_dir}")
                         self._save_failed_selection_case(
                             image_input=image_input,
                             pipeline_config=pipeline_config,
                             error_info=error_info,
                             metadata=metadata
                         )
+                    else:
+                        print(f"[DEBUG] 跳过保存失败案例（异常），failed_selection_dir 为 None")
                     
                     print(f"[ERROR] {error_info['error_reason']}")
                     return None, error_info
@@ -576,7 +582,10 @@ class VQAGenerator:
             metadata: 元数据
         """
         if not self.failed_selection_dir:
+            print(f"[DEBUG] _save_failed_selection_case: failed_selection_dir 为 None，跳过保存")
             return
+        
+        print(f"[DEBUG] _save_failed_selection_case: 开始保存失败案例到 {self.failed_selection_dir}")
         
         try:
             # 生成案例ID（基于时间戳和记录ID）
@@ -753,11 +762,31 @@ class VQAGenerator:
                         if self.object_selection_policy.get("fallback_strategy") == "discard_image":
                             error_info["error_stage"] = "object_selection"
                             error_info["error_reason"] = "无法选择对象"
+                            
+                            # 保存失败案例（异步版本，使用base64）
+                            if self.failed_selection_dir:
+                                self._save_failed_selection_case(
+                                    image_input=image_base64,
+                                    pipeline_config=pipeline_config,
+                                    error_info=error_info,
+                                    metadata=metadata
+                                )
+                            
                             print(f"[INFO] 无法为pipeline '{pipeline_name}' 选择对象，丢弃样本")
                             return None, error_info
                 except Exception as e:
                     error_info["error_stage"] = "object_selection"
                     error_info["error_reason"] = f"对象选择过程出错: {str(e)}"
+                    
+                    # 保存失败案例（异步版本，使用base64）
+                    if self.failed_selection_dir:
+                        self._save_failed_selection_case(
+                            image_input=image_base64,
+                            pipeline_config=pipeline_config,
+                            error_info=error_info,
+                            metadata=metadata
+                        )
+                    
                     print(f"[ERROR] {error_info['error_reason']}")
                     return None, error_info
             
@@ -893,7 +922,8 @@ class VQAGenerator:
         max_samples: Optional[int] = None,
         num_gpus: int = 1,
         max_concurrent_per_gpu: int = 10,
-        request_delay: float = 0.1
+        request_delay: float = 0.1,
+        failed_selection_dir: Optional[Path] = None
     ) -> None:
         """
         异步处理数据文件，为每张图片生成VQA问题（并行版本）
@@ -906,7 +936,19 @@ class VQAGenerator:
             num_gpus: GPU数量（用于进程隔离，实际是API并发控制）
             max_concurrent_per_gpu: 每个GPU的最大并发数
             request_delay: 每个请求之间的延迟（秒）
+            failed_selection_dir: 失败案例存储目录（可选，如果为None且self.failed_selection_dir也为None则不保存）
         """
+        # 如果传入了failed_selection_dir，使用它；否则使用初始化时设置的
+        if failed_selection_dir is not None:
+            self.failed_selection_dir = failed_selection_dir
+            self.failed_selection_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 如果没有设置失败案例目录，使用输出目录的子目录
+        if self.failed_selection_dir is None:
+            self.failed_selection_dir = output_file.parent / "failed_selection"
+            self.failed_selection_dir.mkdir(parents=True, exist_ok=True)
+            print(f"[INFO] 失败案例将保存到: {self.failed_selection_dir}")
+        
         print(f"[INFO] 读取输入文件: {input_file}")
         with open(input_file, 'r', encoding='utf-8') as f:
             data = json.load(f)

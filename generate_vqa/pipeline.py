@@ -599,6 +599,8 @@ class VQAPipeline:
                     # 使用异步并行处理（如果启用）
                     if use_async:
                         print(f"[INFO] 使用异步并行生成问题，并发数: {concurrency}")
+                        # 设置失败案例目录（在输出目录下创建子目录）
+                        failed_selection_dir = batch_questions_file.parent / "failed_selection"
                         # 使用异步方法生成问题
                         await self.question_generator.process_data_file_async(
                             input_file=batch_input_file,
@@ -607,7 +609,8 @@ class VQAPipeline:
                             max_samples=None,  # 批次文件已经限制大小
                             num_gpus=1,  # 问题生成阶段使用单GPU组
                             max_concurrent_per_gpu=concurrency,
-                            request_delay=request_delay
+                            request_delay=request_delay,
+                            failed_selection_dir=failed_selection_dir
                         )
                     else:
                         # 使用同步方法（兼容模式）
