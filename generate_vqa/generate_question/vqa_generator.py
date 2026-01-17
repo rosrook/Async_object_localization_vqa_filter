@@ -939,4 +939,3 @@ class VQAGenerator:
             final_results.extend(gpu_results)
         
         return final_results
-
