@@ -110,8 +110,6 @@ class VQAGenerator:
                     )
                     
                     # 检查对象选择是否失败（包括返回None或selected=False）
-                    if selected_object is not None:
-                    
                     if selected_object is None or selected_object.get("selected") == False:
                         # 根据策略，如果对象选择失败则丢弃
                         if self.object_selection_policy.get("fallback_strategy") == "discard_image":
@@ -137,7 +135,6 @@ class VQAGenerator:
                                 print(f"[WARNING] 跳过保存失败案例，failed_selection_dir 为 None")
                             
                             return None, error_info
-                    else:
                 except Exception as e:
                     error_info["error_stage"] = "object_selection"
                     error_info["error_reason"] = f"对象选择过程出错: {str(e)}"
@@ -151,7 +148,6 @@ class VQAGenerator:
                             metadata=metadata,
                             selection_result=None  # 异常情况下没有选择结果
                         )
-                    else:
                     
                     print(f"[ERROR] {error_info['error_reason']}")
                     return None, error_info
@@ -308,7 +304,6 @@ class VQAGenerator:
                 pipelines_to_use = pipeline_names if pipeline_names else self.config_loader.list_pipelines()
                 if not pipeline_names:
                     print(f"[WARNING] 记录 {idx} 未指定pipeline，且未传入pipeline_names，将使用所有pipeline: {pipelines_to_use}")
-                else:
             
             # 为确定的pipeline生成问题
             for pipeline_name in pipelines_to_use:
@@ -700,6 +695,7 @@ class VQAGenerator:
                                 return Image.open(path)
                         except (OSError, ValueError) as e:
                             # 如果创建Path对象失败（如文件名太长），跳过路径处理
+                            pass
                     
                     # 作为字符串处理（可能是base64）
                     if len(image_input) > 50:
@@ -750,10 +746,6 @@ class VQAGenerator:
                                     if len(image_data) == 0:
                                         print(f"[ERROR] base64解码后数据为空")
                                         image_data = None
-                                    else:
-                                        # JPEG文件头应该是 FF D8 FF
-                                        if len(image_data) >= 3 and image_data[0:3] == b'\xff\xd8\xff':
-                                        else:
                                 else:
                                     print(f"[ERROR] base64解码失败，image_data 为 None")
                             except Exception as e:
@@ -774,7 +766,6 @@ class VQAGenerator:
                                 return None
                         else:
                             print(f"[ERROR] image_data 为 None，base64解码可能未执行或失败")
-                            if isinstance(image_input, str):
                             return None
                     else:
                         print(f"[WARNING] 字符串太短（长度={len(image_input)}），不可能是有效的图片数据")
@@ -859,8 +850,6 @@ class VQAGenerator:
                     )
                     
                     # 检查对象选择是否失败（包括返回None或selected=False）
-                    if selected_object is not None:
-                    
                     if selected_object is None or selected_object.get("selected") == False:
                         # 根据策略，如果对象选择失败则丢弃
                         if self.object_selection_policy.get("fallback_strategy") == "discard_image":
@@ -886,7 +875,6 @@ class VQAGenerator:
                                 print(f"[WARNING] [异步] 跳过保存失败案例，failed_selection_dir 为 None")
                             
                             return None, error_info
-                    else:
                 except Exception as e:
                     error_info["error_stage"] = "object_selection"
                     error_info["error_reason"] = f"对象选择过程出错: {str(e)}"
