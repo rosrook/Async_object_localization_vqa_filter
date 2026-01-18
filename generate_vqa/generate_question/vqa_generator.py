@@ -646,7 +646,9 @@ class VQAGenerator:
                                 f.write(f"前200个字符: {image_input[:200]}\n")
                                 f.write(f"是否以data:image开头: {image_input.startswith('data:image')}\n")
                                 f.write(f"是否以/9j/开头（JPEG base64）: {image_input.startswith('/9j/')}\n")
-                                f.write(f"是否只包含base64字符: {bool(re.match(r'^[A-Za-z0-9+/=\s]+$', image_input))}\n")
+                                # 检查是否只包含base64字符（不能在f-string中直接使用反斜杠）
+                                base64_pattern_check = re.match(r'^[A-Za-z0-9+/=\s]+$', image_input)
+                                f.write(f"是否只包含base64字符: {bool(base64_pattern_check)}\n")
                                 # 尝试解码并检查
                                 try:
                                     clean_base64 = image_input.strip().replace('\n', '').replace('\r', '').replace(' ', '')
