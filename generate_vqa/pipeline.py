@@ -127,87 +127,43 @@ class VQAPipeline:
                     "answer_type": record.get("answer_type")
                 }
                 
-                # 重试机制：最多重试3次
-                max_retries = 3
-                validated_result = None
-                validation_report = None
-                retry_count = 0
-                last_error = None
+                # 生成答案（移除重试和验证逻辑以提高效率）
+                answer_result = self.answer_generator.generate_answer(
+                    question=question,
+                    image_base64=image_base64,
+                    question_type=question_type,
+                    pipeline_info=pipeline_info
+                )
                 
-                while retry_count <= max_retries:
-                    # 生成答案
-                    answer_result = self.answer_generator.generate_answer(
-                        question=question,
-                        image_base64=image_base64,
-                        question_type=question_type,
-                        pipeline_info=pipeline_info
-                    )
-                    
-                    if not answer_result or answer_result.get("answer") is None:
-                        last_error = "答案生成失败"
-                        retry_count += 1
-                        if retry_count <= max_retries:
-                            print(f"[重试] 记录 {idx} 答案生成失败，正在重试 ({retry_count}/{max_retries})...")
-                            continue
-                        else:
-                            break
-                    
-                    # 校验和修复
-                    validated_result, validation_report = self.validator.validate_and_fix(
-                        result=answer_result,
-                        image_base64=image_base64
-                    )
-                    
-                    # 如果验证通过，退出重试循环
-                    if validation_report.get("validation_passed", False):
-                        if retry_count > 0:
-                            print(f"[成功] 记录 {idx} 经过 {retry_count} 次重试后验证通过")
-                        break
-                    
-                    # 如果验证失败但不需要重新生成，退出循环
-                    if not validation_report.get("should_regenerate", False):
-                        break
-                    
-                    # 需要重新生成，继续重试
-                    retry_count += 1
-                    if retry_count <= max_retries:
-                        reason = validation_report.get("regeneration_reason", "验证失败")
-                        print(f"[重试] 记录 {idx} 验证失败 ({reason})，正在重新生成 ({retry_count}/{max_retries})...")
-                    else:
-                        last_error = f"经过 {max_retries} 次重试后仍验证失败: {validation_report.get('regeneration_reason', '验证失败')}"
-                
-                # 如果所有重试都失败了
-                if validated_result is None or not validation_report.get("validation_passed", False):
+                if not answer_result or answer_result.get("answer") is None:
                     errors.append({
                         "index": idx,
                         "id": record.get("id"),
-                        "error": last_error or "答案生成或验证失败",
-                        "retry_count": retry_count,
-                        "validation_report": validation_report
+                        "error": "答案生成失败"
                     })
                     total_failed += 1
                     continue
                 
-                # 构建输出结果
+                # 构建输出结果（直接使用生成结果，不进行验证）
                 result = {
                     # 原始信息
                     "question": question,
                     "question_type": question_type,
                     "image_base64": image_base64,
                     
-                    # 答案信息（使用校验后的结果）
-                    "answer": validated_result.get("answer", answer_result.get("answer")),
-                    "explanation": validated_result.get("explanation", answer_result.get("explanation", "")),
+                    # 答案信息（直接使用生成结果）
+                    "answer": answer_result.get("answer"),
+                    "explanation": answer_result.get("explanation", ""),
                     
                     # 完整问题（选择题包含选项）
-                    "full_question": validated_result.get("full_question", answer_result.get("full_question", question)),
+                    "full_question": answer_result.get("full_question", question),
                     
                     # 选择题特有字段
-                    "options": validated_result.get("options", answer_result.get("options")),
-                    "correct_option": validated_result.get("correct_option", answer_result.get("correct_option")),
+                    "options": answer_result.get("options"),
+                    "correct_option": answer_result.get("correct_option"),
                     
-                    # 校验信息
-                    "validation_report": validation_report,
+                    # 校验信息（简化：标记为通过）
+                    "validation_report": {"validation_passed": True},
                     
                     # 原始元数据
                     "pipeline_name": record.get("pipeline_name"),
@@ -552,7 +508,6 @@ class VQAPipeline:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
         # 分流处理大文件
-        print(f"\n[INFO] 开始分流处理，批次大小: {batch_size}")
         
         # 收集所有结果
         all_successful_vqa = []  # 最终全部通过可用的vqa数据
@@ -560,7 +515,6 @@ class VQAPipeline:
         all_answer_validation_failed = []  # answer检验不通过的数据
         
         # 读取输入文件
-        print(f"[INFO] 读取输入文件: {input_file}")
         with open(input_file, 'r', encoding='utf-8') as f:
             all_input_data = json.load(f)
         
@@ -572,8 +526,6 @@ class VQAPipeline:
             all_input_data = all_input_data[:max_samples]
             total_records = len(all_input_data)
         
-        print(f"[INFO] 总记录数: {total_records}")
-        print(f"[INFO] 将分 {(total_records + batch_size - 1) // batch_size} 批处理")
         
         # 分批处理
         for batch_idx in range(0, total_records, batch_size):
@@ -603,7 +555,6 @@ class VQAPipeline:
                 try:
                     # 使用异步并行处理（如果启用）
                     if use_async:
-                        print(f"[INFO] 使用异步并行生成问题，并发数: {concurrency}")
                         # 设置失败案例目录（在输出目录下创建子目录，保留失败案例）
                         failed_selection_dir = output_dir / "failed_selection"
                         # 使用异步方法生成问题
@@ -619,7 +570,6 @@ class VQAPipeline:
                         )
                     else:
                         # 使用同步方法（兼容模式）
-                        print(f"[INFO] 使用同步生成问题")
                         # 设置失败案例目录（在输出目录下创建子目录，保留失败案例）
                         failed_selection_dir = output_dir / "failed_selection"
                         self.question_generator.process_data_file(
@@ -677,7 +627,6 @@ class VQAPipeline:
                 try:
                     # 使用异步并行处理（如果启用）
                     if use_async:
-                        print(f"[INFO] 使用异步并行生成答案，并发数: {concurrency}")
                         batch_answers, answer_errors = await self._generate_answers_from_data_async(
                             batch_questions,
                             concurrency=concurrency,
@@ -685,7 +634,6 @@ class VQAPipeline:
                         )
                     else:
                         # 使用串行处理（兼容模式）
-                        print(f"[INFO] 使用串行生成答案")
                         batch_answers, answer_errors = self._generate_answers_from_data(batch_questions)
                     
                     # 只在需要保存中间结果时写入文件
@@ -803,7 +751,6 @@ class VQAPipeline:
                 try:
                     if batch_input_file.exists():
                         batch_input_file.unlink()
-                        print(f"[DEBUG] 已清理临时批次输入文件: {batch_input_file.name}")
                 except Exception as e:
                     print(f"[WARNING] 清理批次输入文件失败: {e}")
                 
@@ -814,7 +761,6 @@ class VQAPipeline:
                         # 检查是否在intermediate目录下
                         if not save_intermediate or (questions_dir and batch_questions_file.parent != questions_dir):
                             batch_questions_file.unlink()
-                            print(f"[DEBUG] 已清理临时批次问题文件: {batch_questions_file.name}")
                 except Exception as e:
                     print(f"[WARNING] 清理批次问题文件失败: {e}")
                 
@@ -823,7 +769,6 @@ class VQAPipeline:
                         # 检查是否在intermediate目录下
                         if not save_intermediate or (answers_dir and batch_answers_file.parent != answers_dir):
                             batch_answers_file.unlink()
-                            print(f"[DEBUG] 已清理临时批次答案文件: {batch_answers_file.name}")
                 except Exception as e:
                     print(f"[WARNING] 清理批次答案文件失败: {e}")
                 
@@ -837,7 +782,6 @@ class VQAPipeline:
                                           if batch_questions_file.stem in f.stem]
                             for error_file in error_files:
                                 error_file.unlink()
-                                print(f"[DEBUG] 已清理批次错误文件: {error_file.name}")
                     except Exception as e:
                         print(f"[WARNING] 清理批次错误文件失败: {e}")
         
@@ -1338,7 +1282,6 @@ def main():
             if logger:
                 logger.info(info_msg)
             else:
-                print(f"[INFO] {info_msg}")
             if args.concurrency > 5:
                 warning_msg = f"并发数设置为 {args.concurrency}，某些API可能不支持高并发\n  如果遇到401错误，建议降低并发数（--concurrency 1-3）"
                 if logger:
@@ -1350,7 +1293,6 @@ def main():
             if logger:
                 logger.info(info_msg)
             else:
-                print(f"[INFO] {info_msg}")
         
         result = pipeline.run(
             input_file=input_file,

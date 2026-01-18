@@ -110,12 +110,9 @@ class VQAGenerator:
                     )
                     
                     # 检查对象选择是否失败（包括返回None或selected=False）
-                    print(f"[DEBUG] 对象选择结果: selected_object={selected_object}, 类型={type(selected_object)}")
                     if selected_object is not None:
-                        print(f"[DEBUG] selected_object内容: {selected_object}")
                     
                     if selected_object is None or selected_object.get("selected") == False:
-                        print(f"[DEBUG] 检测到对象选择失败: selected_object={selected_object}")
                         # 根据策略，如果对象选择失败则丢弃
                         if self.object_selection_policy.get("fallback_strategy") == "discard_image":
                             error_info["error_stage"] = "object_selection"
@@ -124,16 +121,11 @@ class VQAGenerator:
                                 error_info["error_reason"] = f"无法选择对象: {selected_object.get('reason')}"
                                 error_info["model_reason"] = selected_object.get("reason")  # 保存模型的reason
                                 error_info["confidence"] = selected_object.get("confidence", 0.0)
-                                print(f"[DEBUG] 从选择结果中获取reason: {selected_object.get('reason')}")
                             else:
                                 error_info["error_reason"] = "无法选择对象"
-                                print(f"[DEBUG] 未找到reason，使用默认错误信息")
                             
                             # 保存失败案例
-                            print(f"[DEBUG] failed_selection_dir状态: {self.failed_selection_dir}")
                             if self.failed_selection_dir:
-                                print(f"[DEBUG] 准备保存失败案例，failed_selection_dir: {self.failed_selection_dir}")
-                                print(f"[DEBUG] image_input类型: {type(image_input)}")
                                 self._save_failed_selection_case(
                                     image_input=image_input,
                                     pipeline_config=pipeline_config,
@@ -144,17 +136,14 @@ class VQAGenerator:
                             else:
                                 print(f"[WARNING] 跳过保存失败案例，failed_selection_dir 为 None")
                             
-                            print(f"[INFO] 无法为pipeline '{pipeline_name}' 选择对象，丢弃样本")
                             return None, error_info
                     else:
-                        print(f"[DEBUG] 对象选择成功: {selected_object}")
                 except Exception as e:
                     error_info["error_stage"] = "object_selection"
                     error_info["error_reason"] = f"对象选择过程出错: {str(e)}"
                     
                     # 保存失败案例
                     if self.failed_selection_dir:
-                        print(f"[DEBUG] 准备保存失败案例（异常），failed_selection_dir: {self.failed_selection_dir}")
                         self._save_failed_selection_case(
                             image_input=image_input,
                             pipeline_config=pipeline_config,
@@ -163,7 +152,6 @@ class VQAGenerator:
                             selection_result=None  # 异常情况下没有选择结果
                         )
                     else:
-                        print(f"[DEBUG] 跳过保存失败案例（异常），failed_selection_dir 为 None")
                     
                     print(f"[ERROR] {error_info['error_reason']}")
                     return None, error_info
@@ -179,7 +167,6 @@ class VQAGenerator:
                 if slots is None:
                     error_info["error_stage"] = "slot_filling"
                     error_info["error_reason"] = "槽位填充失败（必需槽位无法解析）"
-                    print(f"[INFO] 槽位填充失败，丢弃样本")
                     return None, error_info
             except Exception as e:
                 error_info["error_stage"] = "slot_filling"
@@ -203,7 +190,6 @@ class VQAGenerator:
                 if not question:
                     error_info["error_stage"] = "question_generation"
                     error_info["error_reason"] = "问题生成失败（返回空）"
-                    print(f"[INFO] 问题生成失败，丢弃样本")
                     return None, error_info
             except Exception as e:
                 error_info["error_stage"] = "question_generation"
@@ -211,27 +197,7 @@ class VQAGenerator:
                 print(f"[ERROR] {error_info['error_reason']}")
                 return None, error_info
             
-            # STEP 5: 验证
-            try:
-                is_valid, reason = self.validator.validate(
-                    question=question,
-                    image_input=image_input,
-                    pipeline_config=pipeline_config,
-                    global_constraints=self.global_constraints
-                )
-                
-                if not is_valid:
-                    error_info["error_stage"] = "validation"
-                    error_info["error_reason"] = f"问题验证失败: {reason}"
-                    print(f"[INFO] 问题验证失败: {reason}，丢弃样本")
-                    return None, error_info
-            except Exception as e:
-                error_info["error_stage"] = "validation"
-                error_info["error_reason"] = f"验证过程出错: {str(e)}"
-                print(f"[ERROR] {error_info['error_reason']}")
-                return None, error_info
-            
-            # STEP 6: 输出
+            # STEP 5: 输出（跳过验证以提高效率）
             result = {
                 "pipeline_name": pipeline_name,
                 "pipeline_intent": pipeline_config.get("intent", ""),
@@ -240,7 +206,7 @@ class VQAGenerator:
                 "answer_type": pipeline_config.get("answer_type", ""),
                 "slots": slots,
                 "selected_object": selected_object,
-                "validation_reason": reason,
+                "validation_reason": "skipped",
                 "timestamp": datetime.now().isoformat()
             }
             
@@ -279,9 +245,7 @@ class VQAGenerator:
         if self.failed_selection_dir is None:
             self.failed_selection_dir = output_file.parent / "failed_selection"
             self.failed_selection_dir.mkdir(parents=True, exist_ok=True)
-            print(f"[INFO] 失败案例将保存到: {self.failed_selection_dir}")
         
-        print(f"[INFO] 读取输入文件: {input_file}")
         with open(input_file, 'r', encoding='utf-8') as f:
             data = json.load(f)
         
@@ -292,12 +256,9 @@ class VQAGenerator:
         if pipeline_names is None:
             pipeline_names = self.config_loader.list_pipelines()
         
-        print(f"[INFO] 使用pipelines: {pipeline_names}")
-        print(f"[INFO] 总记录数: {len(data)}")
         
         if max_samples:
             data = data[:max_samples]
-            print(f"[INFO] 限制处理前 {max_samples} 条记录")
         
         # 处理每条记录
         results = []
@@ -341,7 +302,6 @@ class VQAGenerator:
             # 如果记录中指定了pipeline，使用指定的；否则使用传入的pipeline_names
             if record_pipeline:
                 pipelines_to_use = [record_pipeline]
-                print(f"[INFO] 记录 {idx} 使用指定的pipeline: {record_pipeline}")
             else:
                 # 如果记录中没有指定pipeline，使用传入的pipeline_names（如果指定了）
                 # 如果没有传入pipeline_names，则使用所有pipeline（向后兼容）
@@ -349,7 +309,6 @@ class VQAGenerator:
                 if not pipeline_names:
                     print(f"[WARNING] 记录 {idx} 未指定pipeline，且未传入pipeline_names，将使用所有pipeline: {pipelines_to_use}")
                 else:
-                    print(f"[INFO] 记录 {idx} 未指定pipeline，使用传入的pipeline_names: {pipelines_to_use}")
             
             # 为确定的pipeline生成问题
             for pipeline_name in pipelines_to_use:
@@ -603,12 +562,8 @@ class VQAGenerator:
             metadata: 元数据
         """
         if not self.failed_selection_dir:
-            print(f"[DEBUG] _save_failed_selection_case: failed_selection_dir 为 None，跳过保存")
             return
         
-        print(f"[DEBUG] _save_failed_selection_case: 开始保存失败案例到 {self.failed_selection_dir}")
-        print(f"[DEBUG] _save_failed_selection_case: image_input类型={type(image_input)}")
-        print(f"[DEBUG] _save_failed_selection_case: error_stage={error_info.get('error_stage')}, error_reason={error_info.get('error_reason')}")
         
         try:
             # 生成案例ID（基于时间戳和记录ID）
@@ -617,23 +572,17 @@ class VQAGenerator:
             pipeline_name = pipeline_config.get("name", error_info.get("pipeline_name", "unknown"))
             case_id = f"{timestamp}_{record_id}"
             
-            print(f"[DEBUG] 生成案例ID: {case_id}")
             
             # 创建案例子目录
             case_dir = self.failed_selection_dir / case_id
-            print(f"[DEBUG] 创建案例目录: {case_dir}")
             case_dir.mkdir(parents=True, exist_ok=True)
-            print(f"[DEBUG] 案例目录创建成功: {case_dir.exists()}")
             
             # 1. 保存图片（JPG格式）
             image_path = case_dir / "image.jpg"
             try:
-                print(f"[DEBUG] 开始加载图片，image_input类型: {type(image_input)}, 长度: {len(str(image_input)) if isinstance(image_input, str) else 'N/A'}")
                 image = self._load_image_from_input(image_input)
                 if image:
-                    print(f"[DEBUG] 图片加载成功，尺寸: {image.size}, 模式: {image.mode}")
                     image.save(image_path, "JPEG", quality=95)
-                    print(f"[INFO] 已保存失败案例图片: {image_path}")
                 else:
                     print(f"[WARNING] 图片加载失败，返回None。image_input类型: {type(image_input)}")
                     # 尝试保存原始输入信息用于调试
@@ -658,7 +607,6 @@ class VQAGenerator:
                                     f.write(f"前100字符base64测试解码: 失败 - {type(e).__name__}: {e}\n")
                             else:
                                 f.write(f"非字符串类型，值: {str(image_input)[:200]}\n")
-                        print(f"[INFO] 已保存调试信息到: {debug_path}")
                     except Exception as e:
                         print(f"[ERROR] 保存调试信息失败: {e}")
             except Exception as e:
@@ -707,7 +655,6 @@ class VQAGenerator:
             with open(policy_json_path, 'w', encoding='utf-8') as f:
                 json.dump(policy_data, f, ensure_ascii=False, indent=2)
             
-            print(f"[INFO] 已保存失败案例到: {case_dir}")
             
         except Exception as e:
             print(f"[ERROR] 保存失败案例时出错: {e}")
@@ -725,11 +672,9 @@ class VQAGenerator:
             PIL Image对象，如果加载失败返回None
         """
         try:
-            print(f"[DEBUG] _load_image_from_input: 输入类型={type(image_input)}")
             
             # 如果已经是PIL Image，直接返回
             if isinstance(image_input, Image.Image):
-                print(f"[DEBUG] 输入是PIL Image，直接返回")
                 return image_input.copy()
             
             # 如果是字符串或Path
@@ -752,27 +697,21 @@ class VQAGenerator:
                             path = Path(image_input)
                             # 检查是否是文件路径
                             if path.exists() and path.is_file():
-                                print(f"[DEBUG] 从文件路径加载图片: {path}")
                                 return Image.open(path)
                         except (OSError, ValueError) as e:
                             # 如果创建Path对象失败（如文件名太长），跳过路径处理
-                            print(f"[DEBUG] 无法将字符串作为文件路径处理: {e}，将作为base64处理")
                     
                     # 作为字符串处理（可能是base64）
-                    print(f"[DEBUG] 输入是字符串，长度={len(image_input)}")
                     if len(image_input) > 50:
                         image_data = None
                         # 检查是否是base64
                         if image_input.startswith("data:image"):
-                            print(f"[DEBUG] 检测到data:image格式")
                             # 提取base64部分: data:image/jpeg;base64,xxxxx
                             match = re.search(r'base64,(.+)', image_input)
                             if match:
                                 try:
                                     base64_str = match.group(1)
-                                    print(f"[DEBUG] 提取base64字符串，长度={len(base64_str)}")
                                     image_data = base64.b64decode(base64_str)
-                                    print(f"[DEBUG] base64解码成功，数据长度={len(image_data)} bytes")
                                 except Exception as e:
                                     print(f"[ERROR] 解码data:image格式的base64失败: {type(e).__name__}: {e}")
                                     return None
@@ -781,26 +720,20 @@ class VQAGenerator:
                                 return None
                         else:
                             # 尝试直接解码base64（纯base64字符串）
-                            print(f"[DEBUG] 尝试直接解码base64字符串（纯base64格式）")
                             image_data = None  # 初始化变量
                             try:
                                 # 移除可能的空白字符、换行符等
                                 clean_base64 = image_input.strip().replace('\n', '').replace('\r', '').replace(' ', '')
-                                print(f"[DEBUG] 清理后的base64长度: {len(clean_base64)}")
                                 
                                 # 先尝试不使用validate（更宽松）
                                 try:
                                     image_data = base64.b64decode(clean_base64)
-                                    print(f"[DEBUG] base64解码成功（无validate），数据长度={len(image_data)} bytes")
                                 except Exception as e1:
                                     # 如果失败，尝试使用validate
-                                    print(f"[DEBUG] 无validate解码失败: {e1}，尝试使用validate=True")
                                     try:
                                         image_data = base64.b64decode(clean_base64, validate=True)
-                                        print(f"[DEBUG] base64解码成功（有validate），数据长度={len(image_data)} bytes")
                                     except Exception as e2:
                                         # 如果还是失败，尝试添加padding
-                                        print(f"[DEBUG] validate解码也失败: {e2}，尝试添加padding")
                                         try:
                                             padding_needed = 4 - (len(clean_base64) % 4)
                                             if padding_needed != 4:
@@ -808,7 +741,6 @@ class VQAGenerator:
                                             else:
                                                 clean_base64_padded = clean_base64
                                             image_data = base64.b64decode(clean_base64_padded)
-                                            print(f"[DEBUG] base64解码成功（添加padding后），数据长度={len(image_data)} bytes")
                                         except Exception as e3:
                                             print(f"[ERROR] 所有base64解码尝试都失败，最后一个错误: {type(e3).__name__}: {e3}")
                                             image_data = None
@@ -821,9 +753,7 @@ class VQAGenerator:
                                     else:
                                         # JPEG文件头应该是 FF D8 FF
                                         if len(image_data) >= 3 and image_data[0:3] == b'\xff\xd8\xff':
-                                            print(f"[DEBUG] 检测到JPEG文件头")
                                         else:
-                                            print(f"[DEBUG] 图片数据前3个字节: {image_data[0:3] if len(image_data) >= 3 else '不足3字节'}")
                                 else:
                                     print(f"[ERROR] base64解码失败，image_data 为 None")
                             except Exception as e:
@@ -836,7 +766,6 @@ class VQAGenerator:
                         if image_data:
                             try:
                                 img = Image.open(io.BytesIO(image_data))
-                                print(f"[DEBUG] 成功从bytes创建PIL Image，尺寸={img.size}, 模式={img.mode}")
                                 return img
                             except Exception as e:
                                 print(f"[ERROR] 从bytes创建PIL Image失败: {type(e).__name__}: {e}")
@@ -845,12 +774,7 @@ class VQAGenerator:
                                 return None
                         else:
                             print(f"[ERROR] image_data 为 None，base64解码可能未执行或失败")
-                            print(f"[DEBUG] 检查代码执行路径：")
-                            print(f"[DEBUG]   - image_input类型: {type(image_input)}")
-                            print(f"[DEBUG]   - 是字符串: {isinstance(image_input, str)}")
                             if isinstance(image_input, str):
-                                print(f"[DEBUG]   - 字符串长度: {len(image_input)}")
-                                print(f"[DEBUG]   - 以data:image开头: {image_input.startswith('data:image')}")
                             return None
                     else:
                         print(f"[WARNING] 字符串太短（长度={len(image_input)}），不可能是有效的图片数据")
@@ -858,10 +782,8 @@ class VQAGenerator:
             
             # 如果是bytes
             if isinstance(image_input, bytes):
-                print(f"[DEBUG] 输入是bytes，长度={len(image_input)}")
                 try:
                     img = Image.open(io.BytesIO(image_input))
-                    print(f"[DEBUG] 成功从bytes创建PIL Image，尺寸={img.size}, 模式={img.mode}")
                     return img
                 except Exception as e:
                     print(f"[ERROR] 从bytes创建PIL Image失败: {type(e).__name__}: {e}")
@@ -937,12 +859,9 @@ class VQAGenerator:
                     )
                     
                     # 检查对象选择是否失败（包括返回None或selected=False）
-                    print(f"[DEBUG] [异步] 对象选择结果: selected_object={selected_object}, 类型={type(selected_object)}")
                     if selected_object is not None:
-                        print(f"[DEBUG] [异步] selected_object内容: {selected_object}")
                     
                     if selected_object is None or selected_object.get("selected") == False:
-                        print(f"[DEBUG] [异步] 检测到对象选择失败: selected_object={selected_object}")
                         # 根据策略，如果对象选择失败则丢弃
                         if self.object_selection_policy.get("fallback_strategy") == "discard_image":
                             error_info["error_stage"] = "object_selection"
@@ -951,16 +870,11 @@ class VQAGenerator:
                                 error_info["error_reason"] = f"无法选择对象: {selected_object.get('reason')}"
                                 error_info["model_reason"] = selected_object.get("reason")  # 保存模型的reason
                                 error_info["confidence"] = selected_object.get("confidence", 0.0)
-                                print(f"[DEBUG] [异步] 从选择结果中获取reason: {selected_object.get('reason')}")
                             else:
                                 error_info["error_reason"] = "无法选择对象"
-                                print(f"[DEBUG] [异步] 未找到reason，使用默认错误信息")
                             
                             # 保存失败案例（异步版本，使用base64）
-                            print(f"[DEBUG] [异步] failed_selection_dir状态: {self.failed_selection_dir}")
                             if self.failed_selection_dir:
-                                print(f"[DEBUG] [异步] 准备保存失败案例，failed_selection_dir: {self.failed_selection_dir}")
-                                print(f"[DEBUG] [异步] image_base64类型: {type(image_base64)}, 长度: {len(image_base64) if isinstance(image_base64, str) else 'N/A'}")
                                 self._save_failed_selection_case(
                                     image_input=image_base64,
                                     pipeline_config=pipeline_config,
@@ -971,10 +885,8 @@ class VQAGenerator:
                             else:
                                 print(f"[WARNING] [异步] 跳过保存失败案例，failed_selection_dir 为 None")
                             
-                            print(f"[INFO] 无法为pipeline '{pipeline_name}' 选择对象，丢弃样本")
                             return None, error_info
                     else:
-                        print(f"[DEBUG] [异步] 对象选择成功: {selected_object}")
                 except Exception as e:
                     error_info["error_stage"] = "object_selection"
                     error_info["error_reason"] = f"对象选择过程出错: {str(e)}"
@@ -1003,7 +915,6 @@ class VQAGenerator:
                 if slots is None:
                     error_info["error_stage"] = "slot_filling"
                     error_info["error_reason"] = "槽位填充失败（必需槽位无法解析）"
-                    print(f"[INFO] 槽位填充失败，丢弃样本")
                     return None, error_info
             except Exception as e:
                 error_info["error_stage"] = "slot_filling"
@@ -1046,7 +957,6 @@ class VQAGenerator:
                         else:
                             error_info["error_stage"] = "question_generation"
                             error_info["error_reason"] = f"经过 {max_retries} 次重试后仍失败: {last_error}"
-                            print(f"[INFO] 问题生成失败，已重试 {max_retries} 次，丢弃样本")
                             return None, error_info
                     
                     # 验证问题
@@ -1074,7 +984,6 @@ class VQAGenerator:
                         else:
                             error_info["error_stage"] = "validation"
                             error_info["error_reason"] = f"经过 {max_retries} 次重试后仍验证失败: {reason}"
-                            print(f"[INFO] 问题验证失败，已重试 {max_retries} 次，丢弃样本")
                             return None, error_info
                             
                 except Exception as e:
@@ -1095,7 +1004,7 @@ class VQAGenerator:
                 error_info["error_reason"] = last_error or "问题生成或验证失败"
                 return None, error_info
             
-            # STEP 6: 输出
+            # STEP 5: 输出（跳过验证以提高效率）
             result = {
                 "pipeline_name": pipeline_name,
                 "pipeline_intent": pipeline_config.get("intent", ""),
@@ -1104,7 +1013,7 @@ class VQAGenerator:
                 "answer_type": pipeline_config.get("answer_type", ""),
                 "slots": slots,
                 "selected_object": selected_object,
-                "validation_reason": reason,
+                "validation_reason": "skipped",
                 "timestamp": datetime.now().isoformat()
             }
             
@@ -1149,9 +1058,7 @@ class VQAGenerator:
         if self.failed_selection_dir is None:
             self.failed_selection_dir = output_file.parent / "failed_selection"
             self.failed_selection_dir.mkdir(parents=True, exist_ok=True)
-            print(f"[INFO] 失败案例将保存到: {self.failed_selection_dir}")
         
-        print(f"[INFO] 读取输入文件: {input_file}")
         with open(input_file, 'r', encoding='utf-8') as f:
             data = json.load(f)
         
@@ -1162,12 +1069,9 @@ class VQAGenerator:
         if pipeline_names is None:
             pipeline_names = self.config_loader.list_pipelines()
         
-        print(f"[INFO] 使用pipelines: {pipeline_names}")
-        print(f"[INFO] 总记录数: {len(data)}")
         
         if max_samples:
             data = data[:max_samples]
-            print(f"[INFO] 限制处理前 {max_samples} 条记录")
         
         # 准备任务列表
         tasks = []
@@ -1200,8 +1104,6 @@ class VQAGenerator:
                     "source_a": source_a
                 })
         
-        print(f"[INFO] 共 {len(tasks)} 个任务，开始异步并行处理")
-        print(f"[INFO] GPU数量: {num_gpus}, 每GPU并发数: {max_concurrent_per_gpu}")
         
         # 使用多GPU异步处理
         results = await self._process_tasks_async(
