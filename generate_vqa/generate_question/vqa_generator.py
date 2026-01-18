@@ -638,12 +638,27 @@ class VQAGenerator:
                     print(f"[WARNING] 图片加载失败，返回None。image_input类型: {type(image_input)}")
                     # 尝试保存原始输入信息用于调试
                     debug_path = case_dir / "image_input_debug.txt"
-                    with open(debug_path, 'w', encoding='utf-8') as f:
-                        f.write(f"image_input类型: {type(image_input)}\n")
-                        if isinstance(image_input, str):
-                            f.write(f"字符串长度: {len(image_input)}\n")
-                            f.write(f"前100个字符: {image_input[:100]}\n")
-                            f.write(f"是否以data:image开头: {image_input.startswith('data:image')}\n")
+                    try:
+                        with open(debug_path, 'w', encoding='utf-8') as f:
+                            f.write(f"image_input类型: {type(image_input)}\n")
+                            if isinstance(image_input, str):
+                                f.write(f"字符串长度: {len(image_input)}\n")
+                                f.write(f"前200个字符: {image_input[:200]}\n")
+                                f.write(f"是否以data:image开头: {image_input.startswith('data:image')}\n")
+                                f.write(f"是否以/9j/开头（JPEG base64）: {image_input.startswith('/9j/')}\n")
+                                f.write(f"是否只包含base64字符: {bool(re.match(r'^[A-Za-z0-9+/=\s]+$', image_input))}\n")
+                                # 尝试解码并检查
+                                try:
+                                    clean_base64 = image_input.strip().replace('\n', '').replace('\r', '').replace(' ', '')
+                                    test_decode = base64.b64decode(clean_base64[:100] + '==')  # 测试解码前100个字符
+                                    f.write(f"前100字符base64测试解码: 成功，长度={len(test_decode)} bytes\n")
+                                except Exception as e:
+                                    f.write(f"前100字符base64测试解码: 失败 - {type(e).__name__}: {e}\n")
+                            else:
+                                f.write(f"非字符串类型，值: {str(image_input)[:200]}\n")
+                        print(f"[INFO] 已保存调试信息到: {debug_path}")
+                    except Exception as e:
+                        print(f"[ERROR] 保存调试信息失败: {e}")
             except Exception as e:
                 print(f"[ERROR] 保存失败案例图片时发生异常: {type(e).__name__}: {e}")
                 import traceback
@@ -715,15 +730,17 @@ class VQAGenerator:
                 print(f"[DEBUG] 输入是PIL Image，直接返回")
                 return image_input.copy()
             
-            # 如果是路径字符串
+            # 如果是字符串或Path
             if isinstance(image_input, (str, Path)):
-                path = Path(image_input)
-                if path.exists() and path.is_file():
-                    print(f"[DEBUG] 从文件路径加载图片: {path}")
-                    return Image.open(path)
-                
-                # 如果是base64字符串
+                # 先尝试作为文件路径
                 if isinstance(image_input, str):
+                    path = Path(image_input)
+                    # 检查是否是文件路径（路径通常不包含base64字符，且长度较短）
+                    if path.exists() and path.is_file():
+                        print(f"[DEBUG] 从文件路径加载图片: {path}")
+                        return Image.open(path)
+                    
+                    # 作为字符串处理（可能是base64）
                     print(f"[DEBUG] 输入是字符串，长度={len(image_input)}")
                     if len(image_input) > 50:
                         image_data = None
@@ -751,12 +768,31 @@ class VQAGenerator:
                                 # 移除可能的空白字符、换行符等
                                 clean_base64 = image_input.strip().replace('\n', '').replace('\r', '').replace(' ', '')
                                 print(f"[DEBUG] 清理后的base64长度: {len(clean_base64)}")
-                                image_data = base64.b64decode(clean_base64, validate=True)
-                                print(f"[DEBUG] base64解码成功，数据长度={len(image_data)} bytes")
+                                
+                                # 先尝试不使用validate（更宽松）
+                                try:
+                                    image_data = base64.b64decode(clean_base64)
+                                    print(f"[DEBUG] base64解码成功（无validate），数据长度={len(image_data)} bytes")
+                                except Exception as e1:
+                                    # 如果失败，尝试使用validate
+                                    print(f"[DEBUG] 无validate解码失败: {e1}，尝试使用validate=True")
+                                    try:
+                                        image_data = base64.b64decode(clean_base64, validate=True)
+                                        print(f"[DEBUG] base64解码成功（有validate），数据长度={len(image_data)} bytes")
+                                    except Exception as e2:
+                                        # 如果还是失败，尝试添加padding
+                                        print(f"[DEBUG] validate解码也失败: {e2}，尝试添加padding")
+                                        padding_needed = 4 - (len(clean_base64) % 4)
+                                        if padding_needed != 4:
+                                            clean_base64 += '=' * padding_needed
+                                        image_data = base64.b64decode(clean_base64)
+                                        print(f"[DEBUG] base64解码成功（添加padding后），数据长度={len(image_data)} bytes")
+                                
                                 # 验证解码后的数据是否是有效的图片数据
                                 if len(image_data) == 0:
                                     print(f"[ERROR] base64解码后数据为空")
                                     return None
+                                
                                 # JPEG文件头应该是 FF D8 FF
                                 if len(image_data) >= 3 and image_data[0:3] == b'\xff\xd8\xff':
                                     print(f"[DEBUG] 检测到JPEG文件头")
@@ -775,9 +811,15 @@ class VQAGenerator:
                                 return img
                             except Exception as e:
                                 print(f"[ERROR] 从bytes创建PIL Image失败: {type(e).__name__}: {e}")
+                                import traceback
+                                traceback.print_exc()
                                 return None
+                        else:
+                            print(f"[ERROR] image_data 为 None，base64解码可能未执行或失败")
+                            return None
                     else:
                         print(f"[WARNING] 字符串太短（长度={len(image_input)}），不可能是有效的图片数据")
+                        return None
             
             # 如果是bytes
             if isinstance(image_input, bytes):
