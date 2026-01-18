@@ -746,14 +746,26 @@ class VQAGenerator:
                                 return None
                         else:
                             # 尝试直接解码base64（纯base64字符串）
-                            print(f"[DEBUG] 尝试直接解码base64字符串")
+                            print(f"[DEBUG] 尝试直接解码base64字符串（纯base64格式）")
                             try:
-                                # 移除可能的空白字符
-                                clean_base64 = image_input.strip()
-                                image_data = base64.b64decode(clean_base64)
+                                # 移除可能的空白字符、换行符等
+                                clean_base64 = image_input.strip().replace('\n', '').replace('\r', '').replace(' ', '')
+                                print(f"[DEBUG] 清理后的base64长度: {len(clean_base64)}")
+                                image_data = base64.b64decode(clean_base64, validate=True)
                                 print(f"[DEBUG] base64解码成功，数据长度={len(image_data)} bytes")
+                                # 验证解码后的数据是否是有效的图片数据
+                                if len(image_data) == 0:
+                                    print(f"[ERROR] base64解码后数据为空")
+                                    return None
+                                # JPEG文件头应该是 FF D8 FF
+                                if len(image_data) >= 3 and image_data[0:3] == b'\xff\xd8\xff':
+                                    print(f"[DEBUG] 检测到JPEG文件头")
+                                else:
+                                    print(f"[DEBUG] 图片数据前3个字节: {image_data[0:3] if len(image_data) >= 3 else '不足3字节'}")
                             except Exception as e:
                                 print(f"[ERROR] 解码base64字符串失败: {type(e).__name__}: {e}")
+                                import traceback
+                                traceback.print_exc()
                                 return None
                         
                         if image_data:
