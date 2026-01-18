@@ -736,11 +736,27 @@ class VQAGenerator:
             if isinstance(image_input, (str, Path)):
                 # 先尝试作为文件路径
                 if isinstance(image_input, str):
-                    path = Path(image_input)
-                    # 检查是否是文件路径（路径通常不包含base64字符，且长度较短）
-                    if path.exists() and path.is_file():
-                        print(f"[DEBUG] 从文件路径加载图片: {path}")
-                        return Image.open(path)
+                    # 先判断是否可能是文件路径（路径通常较短，且不包含base64字符）
+                    # 如果字符串很长（>500字符），或者以base64特征开头，直接作为base64处理
+                    is_likely_base64 = (
+                        len(image_input) > 500 or  # 文件路径很少超过500字符
+                        image_input.startswith('/9j/') or  # JPEG base64开头
+                        image_input.startswith('data:image') or  # data:image格式
+                        image_input.startswith('iVBORw0KGgo') or  # PNG base64开头
+                        (len(image_input) > 100 and all(c in 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=\n\r\t ' for c in image_input[:200]))  # 前200字符看起来像base64
+                    )
+                    
+                    if not is_likely_base64:
+                        # 只有看起来像文件路径时，才尝试作为路径处理
+                        try:
+                            path = Path(image_input)
+                            # 检查是否是文件路径
+                            if path.exists() and path.is_file():
+                                print(f"[DEBUG] 从文件路径加载图片: {path}")
+                                return Image.open(path)
+                        except (OSError, ValueError) as e:
+                            # 如果创建Path对象失败（如文件名太长），跳过路径处理
+                            print(f"[DEBUG] 无法将字符串作为文件路径处理: {e}，将作为base64处理")
                     
                     # 作为字符串处理（可能是base64）
                     print(f"[DEBUG] 输入是字符串，长度={len(image_input)}")
