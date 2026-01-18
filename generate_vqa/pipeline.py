@@ -592,15 +592,20 @@ class VQAPipeline:
             
             try:
                 # Step 1: 生成问题（支持异步并行处理）
-                batch_questions_file = output_dir / f"batch_{batch_num}_questions_{timestamp}.json"
+                # 如果启用中间结果保存，保存到intermediate/questions目录
+                if save_intermediate and questions_dir:
+                    batch_questions_file = questions_dir / f"batch_{batch_num}_questions_{timestamp}.json"
+                else:
+                    # 临时文件，稍后会被清理
+                    batch_questions_file = output_dir / f"batch_{batch_num}_questions_{timestamp}.json"
                 batch_question_errors = []
                 
                 try:
                     # 使用异步并行处理（如果启用）
                     if use_async:
                         print(f"[INFO] 使用异步并行生成问题，并发数: {concurrency}")
-                        # 设置失败案例目录（在输出目录下创建子目录）
-                        failed_selection_dir = batch_questions_file.parent / "failed_selection"
+                        # 设置失败案例目录（在输出目录下创建子目录，保留失败案例）
+                        failed_selection_dir = output_dir / "failed_selection"
                         # 使用异步方法生成问题
                         await self.question_generator.process_data_file_async(
                             input_file=batch_input_file,
@@ -615,8 +620,8 @@ class VQAPipeline:
                     else:
                         # 使用同步方法（兼容模式）
                         print(f"[INFO] 使用同步生成问题")
-                        # 设置失败案例目录（在输出目录下创建子目录）
-                        failed_selection_dir = batch_questions_file.parent / "failed_selection"
+                        # 设置失败案例目录（在输出目录下创建子目录，保留失败案例）
+                        failed_selection_dir = output_dir / "failed_selection"
                         self.question_generator.process_data_file(
                             input_file=batch_input_file,
                             output_file=batch_questions_file,
@@ -662,7 +667,12 @@ class VQAPipeline:
                     continue
                 
                 # Step 2: 生成答案（优化：直接在内存中处理，减少文件I/O）
-                batch_answers_file = output_dir / f"batch_{batch_num}_answers_{timestamp}.json" if save_intermediate else None
+                # 如果启用中间结果保存，保存到intermediate/answers目录
+                if save_intermediate and answers_dir:
+                    batch_answers_file = answers_dir / f"batch_{batch_num}_answers_{timestamp}.json"
+                else:
+                    # 不保存中间答案文件
+                    batch_answers_file = None
                 
                 try:
                     # 使用异步并行处理（如果启用）
@@ -789,16 +799,47 @@ class VQAPipeline:
                     continue
                 
             finally:
-                # 清理临时批次文件（如果不需要保存中间结果）
+                # 清理临时批次输入文件（总是清理，因为不需要保留）
+                try:
+                    if batch_input_file.exists():
+                        batch_input_file.unlink()
+                        print(f"[DEBUG] 已清理临时批次输入文件: {batch_input_file.name}")
+                except Exception as e:
+                    print(f"[WARNING] 清理批次输入文件失败: {e}")
+                
+                # 清理批次中间文件（如果未保存到intermediate目录）
+                # 如果save_intermediate=False或文件不在intermediate目录下，则清理
+                try:
+                    if batch_questions_file.exists():
+                        # 检查是否在intermediate目录下
+                        if not save_intermediate or (questions_dir and batch_questions_file.parent != questions_dir):
+                            batch_questions_file.unlink()
+                            print(f"[DEBUG] 已清理临时批次问题文件: {batch_questions_file.name}")
+                except Exception as e:
+                    print(f"[WARNING] 清理批次问题文件失败: {e}")
+                
+                try:
+                    if batch_answers_file and batch_answers_file.exists():
+                        # 检查是否在intermediate目录下
+                        if not save_intermediate or (answers_dir and batch_answers_file.parent != answers_dir):
+                            batch_answers_file.unlink()
+                            print(f"[DEBUG] 已清理临时批次答案文件: {batch_answers_file.name}")
+                except Exception as e:
+                    print(f"[WARNING] 清理批次答案文件失败: {e}")
+                
+                # 清理批次错误文件（如果不需要保存中间结果）
                 if not save_intermediate:
                     try:
-                        batch_input_file.unlink()
+                        # 清理问题生成阶段的错误文件
+                        error_pattern = f"*_errors_*.json"
                         if batch_questions_file.exists():
-                            batch_questions_file.unlink()
-                        if batch_answers_file and batch_answers_file.exists():
-                            batch_answers_file.unlink()
-                    except:
-                        pass
+                            error_files = [f for f in batch_questions_file.parent.glob(error_pattern) 
+                                          if batch_questions_file.stem in f.stem]
+                            for error_file in error_files:
+                                error_file.unlink()
+                                print(f"[DEBUG] 已清理批次错误文件: {error_file.name}")
+                    except Exception as e:
+                        print(f"[WARNING] 清理批次错误文件失败: {e}")
         
         # Step 3: 生成最终输出文件
         print("\n" + "=" * 80)
@@ -836,43 +877,26 @@ class VQAPipeline:
         self.stats["question_errors"] = len(all_question_errors)
         self.stats["input_records"] = total_records
         
-        # 生成统计信息
-        statistics_file = output_dir / f"statistics_{timestamp}.json"
-        statistics = self._generate_statistics(successful_vqa_data, all_successful_vqa)
-        statistics["pipeline_info"] = {
-            "input_file": str(input_file),
-            "timestamp": timestamp,
-            "pipeline_names": pipeline_names,
-            "max_samples": max_samples,
-            "batch_size": batch_size
-        }
-        statistics["stats"] = self.stats
-        statistics["output_files"] = {
-            "successful_vqa": str(successful_vqa_file),
-            "question_errors": str(question_errors_file),
-            "answer_validation_failed": str(answer_validation_failed_file)
-        }
-        
-        with open(statistics_file, 'w', encoding='utf-8') as f:
-            json.dump(statistics, f, ensure_ascii=False, indent=2)
-        print(f"✓ 统计信息已保存: {statistics_file}")
-        
-        # 生成摘要报告
+        # 生成摘要报告（不再生成统计文件）
         print("\n" + "=" * 80)
         print("流程完成摘要")
         print("=" * 80)
-        self._print_summary_batch(
-            successful_vqa_file, 
-            question_errors_file, 
-            answer_validation_failed_file, 
-            statistics_file
-        )
+        print(f"成功VQA数据: {successful_vqa_file}")
+        print(f"  - 总样本数: {len(successful_vqa_data)}")
+        print(f"问题生成错误: {question_errors_file}")
+        print(f"  - 错误记录数: {len(all_question_errors)}")
+        print(f"答案校验失败: {answer_validation_failed_file}")
+        print(f"  - 失败记录数: {len(validation_failed_data)}")
+        if save_intermediate and intermediate_dir:
+            print(f"中间结果目录: {intermediate_dir}")
+        if (output_dir / "failed_selection").exists():
+            print(f"对象选择失败案例: {output_dir / 'failed_selection'}")
+        print("=" * 80)
         
         return {
             "successful_vqa": successful_vqa_file,
             "question_errors": question_errors_file,
             "answer_validation_failed": answer_validation_failed_file,
-            "statistics": statistics_file,
             "stats": self.stats
         }
     
