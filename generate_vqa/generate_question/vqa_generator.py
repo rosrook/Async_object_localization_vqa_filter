@@ -110,7 +110,12 @@ class VQAGenerator:
                     )
                     
                     # 检查对象选择是否失败（包括返回None或selected=False）
+                    print(f"[DEBUG] 对象选择结果: selected_object={selected_object}, 类型={type(selected_object)}")
+                    if selected_object is not None:
+                        print(f"[DEBUG] selected_object内容: {selected_object}")
+                    
                     if selected_object is None or selected_object.get("selected") == False:
+                        print(f"[DEBUG] 检测到对象选择失败: selected_object={selected_object}")
                         # 根据策略，如果对象选择失败则丢弃
                         if self.object_selection_policy.get("fallback_strategy") == "discard_image":
                             error_info["error_stage"] = "object_selection"
@@ -119,12 +124,16 @@ class VQAGenerator:
                                 error_info["error_reason"] = f"无法选择对象: {selected_object.get('reason')}"
                                 error_info["model_reason"] = selected_object.get("reason")  # 保存模型的reason
                                 error_info["confidence"] = selected_object.get("confidence", 0.0)
+                                print(f"[DEBUG] 从选择结果中获取reason: {selected_object.get('reason')}")
                             else:
                                 error_info["error_reason"] = "无法选择对象"
+                                print(f"[DEBUG] 未找到reason，使用默认错误信息")
                             
                             # 保存失败案例
+                            print(f"[DEBUG] failed_selection_dir状态: {self.failed_selection_dir}")
                             if self.failed_selection_dir:
                                 print(f"[DEBUG] 准备保存失败案例，failed_selection_dir: {self.failed_selection_dir}")
+                                print(f"[DEBUG] image_input类型: {type(image_input)}")
                                 self._save_failed_selection_case(
                                     image_input=image_input,
                                     pipeline_config=pipeline_config,
@@ -133,10 +142,12 @@ class VQAGenerator:
                                     selection_result=selected_object  # 传递选择结果以获取reason
                                 )
                             else:
-                                print(f"[DEBUG] 跳过保存失败案例，failed_selection_dir 为 None")
+                                print(f"[WARNING] 跳过保存失败案例，failed_selection_dir 为 None")
                             
                             print(f"[INFO] 无法为pipeline '{pipeline_name}' 选择对象，丢弃样本")
                             return None, error_info
+                    else:
+                        print(f"[DEBUG] 对象选择成功: {selected_object}")
                 except Exception as e:
                     error_info["error_stage"] = "object_selection"
                     error_info["error_reason"] = f"对象选择过程出错: {str(e)}"
@@ -596,6 +607,8 @@ class VQAGenerator:
             return
         
         print(f"[DEBUG] _save_failed_selection_case: 开始保存失败案例到 {self.failed_selection_dir}")
+        print(f"[DEBUG] _save_failed_selection_case: image_input类型={type(image_input)}")
+        print(f"[DEBUG] _save_failed_selection_case: error_stage={error_info.get('error_stage')}, error_reason={error_info.get('error_reason')}")
         
         try:
             # 生成案例ID（基于时间戳和记录ID）
@@ -604,19 +617,37 @@ class VQAGenerator:
             pipeline_name = pipeline_config.get("name", error_info.get("pipeline_name", "unknown"))
             case_id = f"{timestamp}_{record_id}"
             
+            print(f"[DEBUG] 生成案例ID: {case_id}")
+            
             # 创建案例子目录
             case_dir = self.failed_selection_dir / case_id
+            print(f"[DEBUG] 创建案例目录: {case_dir}")
             case_dir.mkdir(parents=True, exist_ok=True)
+            print(f"[DEBUG] 案例目录创建成功: {case_dir.exists()}")
             
             # 1. 保存图片（JPG格式）
             image_path = case_dir / "image.jpg"
             try:
+                print(f"[DEBUG] 开始加载图片，image_input类型: {type(image_input)}, 长度: {len(str(image_input)) if isinstance(image_input, str) else 'N/A'}")
                 image = self._load_image_from_input(image_input)
                 if image:
+                    print(f"[DEBUG] 图片加载成功，尺寸: {image.size}, 模式: {image.mode}")
                     image.save(image_path, "JPEG", quality=95)
                     print(f"[INFO] 已保存失败案例图片: {image_path}")
+                else:
+                    print(f"[WARNING] 图片加载失败，返回None。image_input类型: {type(image_input)}")
+                    # 尝试保存原始输入信息用于调试
+                    debug_path = case_dir / "image_input_debug.txt"
+                    with open(debug_path, 'w', encoding='utf-8') as f:
+                        f.write(f"image_input类型: {type(image_input)}\n")
+                        if isinstance(image_input, str):
+                            f.write(f"字符串长度: {len(image_input)}\n")
+                            f.write(f"前100个字符: {image_input[:100]}\n")
+                            f.write(f"是否以data:image开头: {image_input.startswith('data:image')}\n")
             except Exception as e:
-                print(f"[WARNING] 保存失败案例图片失败: {e}")
+                print(f"[ERROR] 保存失败案例图片时发生异常: {type(e).__name__}: {e}")
+                import traceback
+                traceback.print_exc()
             
             # 2. 保存错误信息JSON（包含模型的reason）
             error_json_path = case_dir / "error_info.json"
@@ -677,56 +708,83 @@ class VQAGenerator:
             PIL Image对象，如果加载失败返回None
         """
         try:
+            print(f"[DEBUG] _load_image_from_input: 输入类型={type(image_input)}")
+            
             # 如果已经是PIL Image，直接返回
             if isinstance(image_input, Image.Image):
+                print(f"[DEBUG] 输入是PIL Image，直接返回")
                 return image_input.copy()
             
             # 如果是路径字符串
             if isinstance(image_input, (str, Path)):
                 path = Path(image_input)
                 if path.exists() and path.is_file():
+                    print(f"[DEBUG] 从文件路径加载图片: {path}")
                     return Image.open(path)
                 
                 # 如果是base64字符串
-                if isinstance(image_input, str) and len(image_input) > 50:
-                    image_data = None
-                    # 检查是否是base64
-                    if image_input.startswith("data:image"):
-                        # 提取base64部分: data:image/jpeg;base64,xxxxx
-                        match = re.search(r'base64,(.+)', image_input)
-                        if match:
-                            try:
-                                image_data = base64.b64decode(match.group(1))
-                            except Exception as e:
-                                print(f"[WARNING] 解码data:image格式的base64失败: {e}")
+                if isinstance(image_input, str):
+                    print(f"[DEBUG] 输入是字符串，长度={len(image_input)}")
+                    if len(image_input) > 50:
+                        image_data = None
+                        # 检查是否是base64
+                        if image_input.startswith("data:image"):
+                            print(f"[DEBUG] 检测到data:image格式")
+                            # 提取base64部分: data:image/jpeg;base64,xxxxx
+                            match = re.search(r'base64,(.+)', image_input)
+                            if match:
+                                try:
+                                    base64_str = match.group(1)
+                                    print(f"[DEBUG] 提取base64字符串，长度={len(base64_str)}")
+                                    image_data = base64.b64decode(base64_str)
+                                    print(f"[DEBUG] base64解码成功，数据长度={len(image_data)} bytes")
+                                except Exception as e:
+                                    print(f"[ERROR] 解码data:image格式的base64失败: {type(e).__name__}: {e}")
+                                    return None
+                            else:
+                                print(f"[WARNING] 无法从data:image格式中提取base64部分")
                                 return None
                         else:
-                            return None
+                            # 尝试直接解码base64（纯base64字符串）
+                            print(f"[DEBUG] 尝试直接解码base64字符串")
+                            try:
+                                # 移除可能的空白字符
+                                clean_base64 = image_input.strip()
+                                image_data = base64.b64decode(clean_base64)
+                                print(f"[DEBUG] base64解码成功，数据长度={len(image_data)} bytes")
+                            except Exception as e:
+                                print(f"[ERROR] 解码base64字符串失败: {type(e).__name__}: {e}")
+                                return None
+                        
+                        if image_data:
+                            try:
+                                img = Image.open(io.BytesIO(image_data))
+                                print(f"[DEBUG] 成功从bytes创建PIL Image，尺寸={img.size}, 模式={img.mode}")
+                                return img
+                            except Exception as e:
+                                print(f"[ERROR] 从bytes创建PIL Image失败: {type(e).__name__}: {e}")
+                                return None
                     else:
-                        # 尝试直接解码base64（纯base64字符串）
-                        try:
-                            # 移除可能的空白字符
-                            clean_base64 = image_input.strip()
-                            image_data = base64.b64decode(clean_base64)
-                        except Exception as e:
-                            print(f"[WARNING] 解码base64字符串失败: {e}")
-                            return None
-                    
-                    if image_data:
-                        try:
-                            return Image.open(io.BytesIO(image_data))
-                        except Exception as e:
-                            print(f"[WARNING] 从bytes创建PIL Image失败: {e}")
-                            return None
+                        print(f"[WARNING] 字符串太短（长度={len(image_input)}），不可能是有效的图片数据")
             
             # 如果是bytes
             if isinstance(image_input, bytes):
-                return Image.open(io.BytesIO(image_input))
+                print(f"[DEBUG] 输入是bytes，长度={len(image_input)}")
+                try:
+                    img = Image.open(io.BytesIO(image_input))
+                    print(f"[DEBUG] 成功从bytes创建PIL Image，尺寸={img.size}, 模式={img.mode}")
+                    return img
+                except Exception as e:
+                    print(f"[ERROR] 从bytes创建PIL Image失败: {type(e).__name__}: {e}")
+                    return None
             
+            print(f"[WARNING] 无法识别输入类型: {type(image_input)}")
             return None
             
         except Exception as e:
-            print(f"[WARNING] 加载图片失败: {e}")
+            print(f"[ERROR] 加载图片时发生异常: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     async def process_image_pipeline_pair_async(
@@ -790,7 +848,12 @@ class VQAGenerator:
                     )
                     
                     # 检查对象选择是否失败（包括返回None或selected=False）
+                    print(f"[DEBUG] [异步] 对象选择结果: selected_object={selected_object}, 类型={type(selected_object)}")
+                    if selected_object is not None:
+                        print(f"[DEBUG] [异步] selected_object内容: {selected_object}")
+                    
                     if selected_object is None or selected_object.get("selected") == False:
+                        print(f"[DEBUG] [异步] 检测到对象选择失败: selected_object={selected_object}")
                         # 根据策略，如果对象选择失败则丢弃
                         if self.object_selection_policy.get("fallback_strategy") == "discard_image":
                             error_info["error_stage"] = "object_selection"
@@ -799,11 +862,16 @@ class VQAGenerator:
                                 error_info["error_reason"] = f"无法选择对象: {selected_object.get('reason')}"
                                 error_info["model_reason"] = selected_object.get("reason")  # 保存模型的reason
                                 error_info["confidence"] = selected_object.get("confidence", 0.0)
+                                print(f"[DEBUG] [异步] 从选择结果中获取reason: {selected_object.get('reason')}")
                             else:
                                 error_info["error_reason"] = "无法选择对象"
+                                print(f"[DEBUG] [异步] 未找到reason，使用默认错误信息")
                             
                             # 保存失败案例（异步版本，使用base64）
+                            print(f"[DEBUG] [异步] failed_selection_dir状态: {self.failed_selection_dir}")
                             if self.failed_selection_dir:
+                                print(f"[DEBUG] [异步] 准备保存失败案例，failed_selection_dir: {self.failed_selection_dir}")
+                                print(f"[DEBUG] [异步] image_base64类型: {type(image_base64)}, 长度: {len(image_base64) if isinstance(image_base64, str) else 'N/A'}")
                                 self._save_failed_selection_case(
                                     image_input=image_base64,
                                     pipeline_config=pipeline_config,
@@ -811,9 +879,13 @@ class VQAGenerator:
                                     metadata=metadata,
                                     selection_result=selected_object  # 传递选择结果以获取reason
                                 )
+                            else:
+                                print(f"[WARNING] [异步] 跳过保存失败案例，failed_selection_dir 为 None")
                             
                             print(f"[INFO] 无法为pipeline '{pipeline_name}' 选择对象，丢弃样本")
                             return None, error_info
+                    else:
+                        print(f"[DEBUG] [异步] 对象选择成功: {selected_object}")
                 except Exception as e:
                     error_info["error_stage"] = "object_selection"
                     error_info["error_reason"] = f"对象选择过程出错: {str(e)}"
