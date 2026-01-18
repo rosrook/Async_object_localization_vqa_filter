@@ -1278,10 +1278,6 @@ def main():
         use_async = not args.no_async
         
         if use_async:
-            info_msg = f"启用异步并行处理，并发数: {args.concurrency}"
-            if logger:
-                logger.info(info_msg)
-            else:
             if args.concurrency > 5:
                 warning_msg = f"并发数设置为 {args.concurrency}，某些API可能不支持高并发\n  如果遇到401错误，建议降低并发数（--concurrency 1-3）"
                 if logger:
@@ -1292,7 +1288,6 @@ def main():
             info_msg = "使用串行处理（兼容模式）"
             if logger:
                 logger.info(info_msg)
-            else:
         
         result = pipeline.run(
             input_file=input_file,
